@@ -1,0 +1,25 @@
+# CCS / Eclipse build output
+Debug/
+Release/
+
+# Object and generated build files
+*.o
+*.obj
+*.d
+*.map
+*.out
+*.elf
+*.hex
+*.bin
+*.lst
+*.xml
+
+# Local agent/editor scratch data
+.claude/
+.codex_backup_*/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
