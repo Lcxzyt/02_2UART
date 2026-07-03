@@ -131,13 +131,29 @@ static void Show_ImuData(bool oled_ok)
 
 static void Print_VofaData(void)
 {
-    Serial_Printf("%d,%d,%d,%d,%d,%d\r\n",
-                  (int)Motor_GetTarget_L(),
-                  (int)Motor_GetTarget_R(),
-                  (int)Motor_GetActual_L(),
-                  (int)Motor_GetActual_R(),
-                  (int)Motor_GetPwm_L(),
-                  (int)Motor_GetPwm_R());
+    int16_t actual_l = Motor_GetActual_L();
+    int16_t actual_r = Motor_GetActual_R();
+    int8_t pwm_l = Motor_GetPwm_L();
+    int8_t pwm_r = Motor_GetPwm_R();
+
+    if (g_StreamTarget == STREAM_TARGET_BLUETOOTH) {
+        /* 蓝牙 9600 波特率带宽有限，下地实测只发核心四列。 */
+        Bluetooth_Printf("%d,%d,%d,%d\r\n",
+                         (int)actual_l,
+                         (int)actual_r,
+                         (int)pwm_l,
+                         (int)pwm_r);
+    } else {
+        Serial_Printf("%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                      (int)Motor_GetTarget_L(),
+                      (int)Motor_GetTarget_R(),
+                      (int)actual_l,
+                      (int)actual_r,
+                      (int)pwm_l,
+                      (int)pwm_r,
+                      (int)SpeedFiltL,
+                      (int)SpeedFiltR);
+    }
 }
 
 static void Print_ImuData(void)
@@ -183,14 +199,14 @@ int main(void)
     Stream_Printf("\r\n[PIDTUNE] MSPM0 UART0 PID command test\r\n");
     Stream_Printf("[PIDTUNE] UART0 TX=PA10 RX=PA11 Baud=115200\r\n");
     Stream_Printf("[PIDTUNE] HC-06 UART1 TX=PA8 RX=PA9 Baud=9600\r\n");
-    Stream_Printf("[PIDTUNE] TIMER_0=TIMG0 period=50ms\r\n");
+    Stream_Printf("[PIDTUNE] TIMER_0=TIMG0 period=20ms\r\n");
     Stream_Printf("[PIDTUNE] OLED I2C0 SCL=PA1 SDA=PA0 init=%s\r\n", oled_ok ? "OK" : "FAIL");
     Stream_Printf("[PIDTUNE] IMU I2C0 shared bus: PA1/PA0, use m to test\r\n");
     Stream_Printf("[PIDTUNE] TB6612 open-loop PWM output enabled. Test with wheels lifted.\r\n");
-    Stream_Printf("[PIDTUNE] Encoder GPIO: L B02/B03, R B04/B05, t unit=counts/50ms\r\n");
-    Stream_Printf("[PIDTUNE] Commands: t/l/r speed(counts/50ms), p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
-    Stream_Printf("[PIDTUNE] Speed page - VOFA columns: TL,TR,AL,AR,PWML,PWMR\r\n");
-    Stream_Printf("[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
+    Stream_Printf("[PIDTUNE] Encoder GPIO: L B02/B03, R B04/B05, t unit=counts/20ms\r\n");
+    Stream_Printf("[PIDTUNE] Commands: t/l/r speed(counts/20ms), p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
+    Stream_Printf("[PIDTUNE] USB speed stream: TL,TR,AL,AR,PWML,PWMR,FiltL,FiltR\r\n");
+    Stream_Printf("[PIDTUNE] BT speed stream: AL,AR,PWML,PWMR when v from BT\r\n[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
 
     Show_WaitScreen(oled_ok);
 

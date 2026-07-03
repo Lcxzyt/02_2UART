@@ -4,16 +4,22 @@
 #include "Bluetooth.h"
 #include "IMUTest.h"
 #include "Serial.h"
+#include "Timer.h"
 #include <stdlib.h>
 
 #define Cmd_Printf(...) do { Serial_Printf(__VA_ARGS__); Bluetooth_Printf(__VA_ARGS__); } while (0)
+/* 20ms 周期下实测满速约 270 counts，留少量余量防止设定值长期不可达。 */
+#define TARGET_MAX_COUNTS_20MS 300
 
 volatile int16_t SpeedL;
 volatile int16_t SpeedR;
+volatile int16_t SpeedFiltL;
+volatile int16_t SpeedFiltR;
 volatile uint8_t g_Cmd = 0x30;
 volatile uint8_t g_Run = 0;
 volatile uint8_t g_SampleReady = 0;
 volatile uint8_t g_Stream = 0;
+volatile uint8_t g_StreamTarget = STREAM_TARGET_NONE;
 volatile uint8_t g_DisplayDirty = 0;
 volatile uint8_t g_ImuDisplayDirty = 0;
 volatile uint8_t g_DisplayMode = 0;
@@ -23,8 +29,8 @@ static int16_t cmd_target_r = 0;
 
 static int16_t Clamp_Target(int16_t target)
 {
-    if (target > 600) return 600;
-    if (target < -600) return -600;
+    if (target > TARGET_MAX_COUNTS_20MS) return TARGET_MAX_COUNTS_20MS;
+    if (target < -TARGET_MAX_COUNTS_20MS) return -TARGET_MAX_COUNTS_20MS;
     return target;
 }
 
@@ -32,6 +38,7 @@ static void Apply_Targets(void)
 {
     if (!g_Run) {
         Motor_Control_Stop();
+        Timer_ResetSpeedFilter();
         return;
     }
 
@@ -56,7 +63,7 @@ static void Print_Params(void)
     Print_Gain("Kp", kp);
     Print_Gain("Ki", ki);
     Print_Gain("Kd", kd);
-    Cmd_Printf("ReqL=%d ReqR=%d TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d Run=%d Stream=%d BTRX=%lu BTIRQ=%lu Unit=target_counts/50ms EncPin=0x%02X EncSumL=%ld EncSumR=%ld\r\n",
+    Cmd_Printf("ReqL=%d ReqR=%d TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d Run=%d Stream=%d BTRX=%lu BTIRQ=%lu Unit=target_counts/20ms FiltL=%d FiltR=%d EncPin=0x%02X EncSumL=%ld EncSumR=%ld\r\n",
                   (int)cmd_target_l,
                   (int)cmd_target_r,
                   (int)Motor_GetTarget_L(),
@@ -69,6 +76,8 @@ static void Print_Params(void)
                   (int)g_Stream,
                   (unsigned long)Bluetooth_GetRxCount(),
                   (unsigned long)Bluetooth_GetIrqCount(),
+                  (int)SpeedFiltL,
+                  (int)SpeedFiltR,
                   (unsigned int)Encoder_GetPinState(),
                   (long)Encoder_GetTotal_L(),
                   (long)Encoder_GetTotal_R());
@@ -140,7 +149,7 @@ static char tune_line[LINE_BUF_SIZE];
 static uint8_t tune_len = 0;
 static uint8_t tune_active = 0;
 
-static void Dispatch_Immediate(uint8_t ch)
+static void Dispatch_Immediate(uint8_t ch, uint8_t source)
 {
     if (ch == '0' || ch == 's' || ch == 'S') {
         g_Cmd = 0x30;
@@ -154,6 +163,7 @@ static void Dispatch_Immediate(uint8_t ch)
         Print_Params();
     } else if (ch == 'v' || ch == 'V') {
         g_Stream ^= 1U;
+        g_StreamTarget = g_Stream ? source : STREAM_TARGET_NONE;
         Print_Params();
     } else if (ch == '?') {
         Print_Params();
@@ -167,7 +177,7 @@ static void Dispatch_Immediate(uint8_t ch)
     }
 }
 
-static void Dispatch_Byte(uint8_t ch)
+static void Dispatch_Byte(uint8_t ch, uint8_t source)
 {
     if (tune_active) {
         if (ch == '\n' || ch == '\r') {
@@ -191,7 +201,7 @@ static void Dispatch_Byte(uint8_t ch)
         return;
     }
 
-    Dispatch_Immediate(ch);
+    Dispatch_Immediate(ch, source);
 }
 
 void CmdDispatch_ApplyTargets(void)
@@ -205,12 +215,12 @@ void CmdDispatch_Process(void)
 
     Bluetooth_PollRx();
     while (count-- && !Serial_RingBuf_IsEmpty()) {
-        Dispatch_Byte(Serial_RingBuf_Get());
+        Dispatch_Byte(Serial_RingBuf_Get(), STREAM_TARGET_SERIAL);
     }
 
     count = 24U;
     while (count-- && !Bluetooth_RingBuf_IsEmpty()) {
-        Dispatch_Byte(Bluetooth_RingBuf_Get());
+        Dispatch_Byte(Bluetooth_RingBuf_Get(), STREAM_TARGET_BLUETOOTH);
     }
 }
 

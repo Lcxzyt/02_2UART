@@ -7,11 +7,11 @@
 #define MOTOR_NUM 2U
 
 #define PID_KP_DEFAULT 0.026f
-#define PID_KI_DEFAULT 0.030f
+#define PID_KI_DEFAULT 0.012f
 #define PID_KD_DEFAULT 0.000f
 #define PID_OUT_LIMIT  100.0f
 
-/* t/l/r 指令单位为编码器速度 counts/50ms，PID 输出才是 PWM 占空比。 */
+/* t/l/r 指令单位为编码器速度 counts/20ms，PID 输出才是 PWM 占空比。 */
 #define MOTOR_USE_PID_LOOP 1U
 #define PWM_MAX_COMPARE    999U
 
