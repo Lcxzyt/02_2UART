@@ -234,7 +234,20 @@ void CmdDispatch_PrintTracking(uint8_t target)
     uint8_t bits;
     uint8_t pattern;
 
-    if (!Tracking_Update()) {
+    track = Tracking_GetData();
+    if ((!LineFollow_IsEnabled()) || !track->valid) {
+        if (!Tracking_Update()) {
+            if (target == STREAM_TARGET_BLUETOOTH) {
+                Bluetooth_Printf("IR ADC read timeout\r\n");
+            } else {
+                Serial_Printf("IR ADC read timeout\r\n");
+            }
+            return;
+        }
+        track = Tracking_GetData();
+    }
+
+    if (!track->valid) {
         if (target == STREAM_TARGET_BLUETOOTH) {
             Bluetooth_Printf("IR ADC read timeout\r\n");
         } else {
@@ -243,7 +256,6 @@ void CmdDispatch_PrintTracking(uint8_t target)
         return;
     }
 
-    track = Tracking_GetData();
     bits = Cmd_UpdateIrBitsFromTrack(track);
     pattern = LineFollow_IsEnabled() ? LineFollow_GetPattern() : bits;
 
@@ -311,8 +323,13 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
         Apply_Targets();
         Print_Params();
     } else if (ch == 'v' || ch == 'V') {
-        g_Stream ^= 1U;
-        g_StreamTarget = g_Stream ? source : STREAM_TARGET_NONE;
+        if (LineFollow_IsEnabled()) {
+            g_Stream = 0U;
+            g_StreamTarget = STREAM_TARGET_NONE;
+        } else {
+            g_Stream ^= 1U;
+            g_StreamTarget = g_Stream ? source : STREAM_TARGET_NONE;
+        }
         Print_Params();
     } else if (ch == '?') {
         Print_Params();
@@ -341,6 +358,8 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             Motor_OpenLoop_Stop();
             LineFollow_Start();
             g_Run = 1U;
+            g_Stream = 0U;
+            g_StreamTarget = STREAM_TARGET_NONE;
         }
         Print_Params();
     }

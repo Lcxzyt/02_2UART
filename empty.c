@@ -25,6 +25,39 @@
 
 static uint8_t display_layout = DISPLAY_LAYOUT_WAIT;
 
+typedef struct {
+    int16_t target_l;
+    int16_t target_r;
+    int16_t actual_l;
+    int16_t actual_r;
+    int8_t pwm_l;
+    int8_t pwm_r;
+    int32_t kp_milli;
+    uint8_t run;
+    uint8_t stream;
+    uint8_t valid;
+} SpeedDisplayCache;
+
+typedef struct {
+    uint8_t mpu_id;
+    uint8_t mag_id;
+    uint8_t mag_addr;
+    uint8_t ok;
+    int16_t roll;
+    int16_t pitch;
+    int16_t yaw;
+    uint8_t valid;
+} ImuDisplayCache;
+
+static SpeedDisplayCache speed_cache;
+static ImuDisplayCache imu_cache;
+
+static void Invalidate_DisplayCaches(void)
+{
+    speed_cache.valid = 0U;
+    imu_cache.valid = 0U;
+}
+
 static void Show_WaitScreen(bool oled_ok)
 {
     if (!oled_ok) return;
@@ -37,6 +70,7 @@ static void Show_WaitScreen(bool oled_ok)
     OLED_ShowString(3, 1, "m page toggle");
     OLED_ShowString(4, 1, "? params v log");
     display_layout = DISPLAY_LAYOUT_WAIT;
+    Invalidate_DisplayCaches();
 }
 
 static void Ensure_SpeedLayout(bool oled_ok)
@@ -55,6 +89,7 @@ static void Ensure_SpeedLayout(bool oled_ok)
         OLED_ShowString(3, 9, "PR");
         OLED_ShowString(4, 6, "Kp");
         display_layout = DISPLAY_LAYOUT_SPEED;
+        speed_cache.valid = 0U;
     }
 }
 
@@ -62,6 +97,14 @@ static void Show_SpeedData(bool oled_ok)
 {
     float kp, ki, kd;
     int32_t kp_milli;
+    int16_t target_l;
+    int16_t target_r;
+    int16_t actual_l;
+    int16_t actual_r;
+    int8_t pwm_l;
+    int8_t pwm_r;
+    uint8_t run;
+    uint8_t stream;
 
     if (!oled_ok) return;
 
@@ -74,15 +117,52 @@ static void Show_SpeedData(bool oled_ok)
     if (kp_milli < 0) kp_milli = -kp_milli;
     if (kp_milli > 999) kp_milli = 999;
 
-    OLED_ShowSignedNum(1, 3, Motor_GetTarget_L(), 4);
-    OLED_ShowSignedNum(1, 11, Motor_GetTarget_R(), 4);
-    OLED_ShowSignedNum(2, 3, SpeedL, 4);
-    OLED_ShowSignedNum(2, 11, SpeedR, 4);
-    OLED_ShowSignedNum(3, 3, Motor_GetPwm_L(), 3);
-    OLED_ShowSignedNum(3, 11, Motor_GetPwm_R(), 3);
-    OLED_ShowString(4, 1, g_Run ? "RUN " : "STOP");
-    OLED_ShowNum(4, 8, (uint32_t)kp_milli, 3);
-    OLED_ShowString(4, 13, g_Stream ? "V1" : "V0");
+    target_l = Motor_GetTarget_L();
+    target_r = Motor_GetTarget_R();
+    actual_l = SpeedL;
+    actual_r = SpeedR;
+    pwm_l = Motor_GetPwm_L();
+    pwm_r = Motor_GetPwm_R();
+    run = g_Run ? 1U : 0U;
+    stream = g_Stream ? 1U : 0U;
+
+    if ((!speed_cache.valid) || (speed_cache.target_l != target_l)) {
+        OLED_ShowSignedNum(1, 3, target_l, 4);
+        speed_cache.target_l = target_l;
+    }
+    if ((!speed_cache.valid) || (speed_cache.target_r != target_r)) {
+        OLED_ShowSignedNum(1, 11, target_r, 4);
+        speed_cache.target_r = target_r;
+    }
+    if ((!speed_cache.valid) || (speed_cache.actual_l != actual_l)) {
+        OLED_ShowSignedNum(2, 3, actual_l, 4);
+        speed_cache.actual_l = actual_l;
+    }
+    if ((!speed_cache.valid) || (speed_cache.actual_r != actual_r)) {
+        OLED_ShowSignedNum(2, 11, actual_r, 4);
+        speed_cache.actual_r = actual_r;
+    }
+    if ((!speed_cache.valid) || (speed_cache.pwm_l != pwm_l)) {
+        OLED_ShowSignedNum(3, 3, pwm_l, 3);
+        speed_cache.pwm_l = pwm_l;
+    }
+    if ((!speed_cache.valid) || (speed_cache.pwm_r != pwm_r)) {
+        OLED_ShowSignedNum(3, 11, pwm_r, 3);
+        speed_cache.pwm_r = pwm_r;
+    }
+    if ((!speed_cache.valid) || (speed_cache.run != run)) {
+        OLED_ShowString(4, 1, run ? "RUN " : "STOP");
+        speed_cache.run = run;
+    }
+    if ((!speed_cache.valid) || (speed_cache.kp_milli != kp_milli)) {
+        OLED_ShowNum(4, 8, (uint32_t)kp_milli, 3);
+        speed_cache.kp_milli = kp_milli;
+    }
+    if ((!speed_cache.valid) || (speed_cache.stream != stream)) {
+        OLED_ShowString(4, 13, stream ? "V1" : "V0");
+        speed_cache.stream = stream;
+    }
+    speed_cache.valid = 1U;
 }
 
 static void Ensure_ImuLayout(bool oled_ok)
@@ -100,6 +180,7 @@ static void Ensure_ImuLayout(bool oled_ok)
         OLED_ShowString(3, 1, "P");
         OLED_ShowString(4, 1, "Y");
         display_layout = DISPLAY_LAYOUT_IMU;
+        imu_cache.valid = 0U;
     }
 }
 
@@ -119,13 +200,35 @@ static void Show_ImuDataCached(bool oled_ok, bool read_sensor)
 
     Ensure_ImuLayout(oled_ok);
 
-    OLED_ShowHexNum(1, 3, imu.MpuId, 2);
-    OLED_ShowHexNum(1, 7, imu.MagId, 2);
-    OLED_ShowHexNum(1, 11, imu.MagAddr, 2);
-    OLED_ShowString(1, 14, ok ? "OK" : "NG");
-    OLED_ShowSignedNum(2, 3, imu.RollDeg, 4);
-    OLED_ShowSignedNum(3, 3, imu.PitchDeg, 4);
-    OLED_ShowNum(4, 3, (uint32_t)imu.YawDeg, 3);
+    if ((!imu_cache.valid) || (imu_cache.mpu_id != imu.MpuId)) {
+        OLED_ShowHexNum(1, 3, imu.MpuId, 2);
+        imu_cache.mpu_id = imu.MpuId;
+    }
+    if ((!imu_cache.valid) || (imu_cache.mag_id != imu.MagId)) {
+        OLED_ShowHexNum(1, 7, imu.MagId, 2);
+        imu_cache.mag_id = imu.MagId;
+    }
+    if ((!imu_cache.valid) || (imu_cache.mag_addr != imu.MagAddr)) {
+        OLED_ShowHexNum(1, 11, imu.MagAddr, 2);
+        imu_cache.mag_addr = imu.MagAddr;
+    }
+    if ((!imu_cache.valid) || (imu_cache.ok != (ok ? 1U : 0U))) {
+        OLED_ShowString(1, 14, ok ? "OK" : "NG");
+        imu_cache.ok = ok ? 1U : 0U;
+    }
+    if ((!imu_cache.valid) || (imu_cache.roll != imu.RollDeg)) {
+        OLED_ShowSignedNum(2, 3, imu.RollDeg, 4);
+        imu_cache.roll = imu.RollDeg;
+    }
+    if ((!imu_cache.valid) || (imu_cache.pitch != imu.PitchDeg)) {
+        OLED_ShowSignedNum(3, 3, imu.PitchDeg, 4);
+        imu_cache.pitch = imu.PitchDeg;
+    }
+    if ((!imu_cache.valid) || (imu_cache.yaw != imu.YawDeg)) {
+        OLED_ShowNum(4, 3, (uint32_t)imu.YawDeg, 3);
+        imu_cache.yaw = imu.YawDeg;
+    }
+    imu_cache.valid = 1U;
 }
 
 static void Show_ImuData(bool oled_ok)
@@ -213,7 +316,7 @@ int main(void)
     Stream_Printf("[PIDTUNE] Encoder GPIO: L B04/B05, R B02/B03, t unit=counts/20ms\r\n");
     Stream_Printf("[PIDTUNE] IR ADC1: L2 PA16, L1 PA17, R1 PB17, R2 PB18\r\n");
     Stream_Printf("[PIDTUNE] Commands: t/l/r speed, o pwm open-loop, p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
-    Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT bits/pattern/state/diff/TL/TR/AL/AR), X ir once, f toggle, u base, q/a/e kept, lock-turn 0/base FSM\r\n");
+    Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT bits/pattern/state/diff/TL/TR/AL/AR), X ir once, f toggle, u base, q/a/e kept, 4-level ratio FSM\r\n");
     Stream_Printf("[PIDTUNE] USB speed stream: TL,TR,AL,AR,PWML,PWMR,FiltL,FiltR\r\n");
     Stream_Printf("[PIDTUNE] BT speed stream: AL,AR,PWML,PWMR when v from BT; use o20/o30/... to map PWM to speed\r\n[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
 
@@ -250,15 +353,15 @@ int main(void)
             } else {
                 ir_stream_tick = 0U;
             }
-            /* 和 STM32 原工程一致：中断里完成测速/控制，主循环只刷固定显示字段和串口波形。 */
-            if (g_Stream && (g_DisplayMode == 1U)) {
+            /* 巡线时保持主循环轻量；速度流会抢占主循环时间，调试巡线请用 100ms 的 x 流。 */
+            if (g_Stream && (!LineFollow_IsEnabled()) && (g_DisplayMode == 1U)) {
                 Print_ImuData();
             }
 
-            if (!g_IrStream) {
+            if ((!g_IrStream) && (!LineFollow_IsEnabled())) {
                 oled_tick++;
             }
-            if ((!g_IrStream) && (oled_tick >= OLED_UPDATE_TICKS)) {
+            if ((!g_IrStream) && (!LineFollow_IsEnabled()) && (oled_tick >= OLED_UPDATE_TICKS)) {
                 oled_tick = 0U;
                 if (g_DisplayMode == 1U) {
                     if (g_Stream) {
@@ -272,7 +375,7 @@ int main(void)
                 }
             }
 
-            if (g_Stream && (g_DisplayMode != 1U)) {
+            if (g_Stream && (!LineFollow_IsEnabled()) && (g_DisplayMode != 1U)) {
                 Print_VofaData();
             }
         }

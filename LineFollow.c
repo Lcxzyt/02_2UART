@@ -54,6 +54,21 @@
 #define LF_DIR_LEFT -1
 #define LF_DIR_RIGHT 1
 
+#define LF_SPEED_RATIO_DEN 30
+#define LF_TURN_LEVEL_MAX 4U
+
+typedef struct {
+    uint8_t fast_ratio;
+    uint8_t slow_ratio;
+} LF_TurnRatio;
+
+static const LF_TurnRatio lf_turn_ratio[LF_TURN_LEVEL_MAX] = {
+    {30U, 25U},  /* level 1: 30/25 at base 30 */
+    {30U, 15U},  /* level 2: 30/15 at base 30 */
+    {30U, 10U},  /* level 3: 30/10 at base 30 */
+    {30U,  0U},  /* level 4: 30/0  at base 30 */
+};
+
 static uint8_t lf_enabled;
 static uint8_t lf_state;
 static uint8_t lf_ir_bits;
@@ -79,6 +94,8 @@ static const uint8_t lf_bit_mask[TRACK_NUM] = {
     LF_BIT_L2, LF_BIT_L1, LF_BIT_R1, LF_BIT_R2
 };
 
+static void LineFollow_TurnLevel(int8_t direction, uint8_t level);
+
 static int16_t Clamp_Int16(int16_t value, int16_t min, int16_t max)
 {
     if (value > max) return max;
@@ -94,6 +111,14 @@ static int16_t Clamp_Target(int16_t target)
 static int16_t LineFollow_BaseSpeed(void)
 {
     return Clamp_Int16(lf_base_speed, 0, LF_TARGET_LIMIT);
+}
+
+static int16_t LineFollow_ScaleSpeed(int16_t base, uint8_t ratio)
+{
+    int32_t speed;
+
+    speed = ((int32_t)base * (int32_t)ratio + (LF_SPEED_RATIO_DEN / 2)) / LF_SPEED_RATIO_DEN;
+    return Clamp_Int16((int16_t)speed, 0, LF_TARGET_LIMIT);
 }
 
 static void LineFollow_SetTargets(int16_t left, int16_t right)
@@ -169,20 +194,33 @@ static void LineFollow_GoStraight(void)
 
 static void LineFollow_Turn(int8_t direction)
 {
+    LineFollow_TurnLevel(direction, LF_TURN_LEVEL_MAX);
+}
+
+static void LineFollow_TurnLevel(int8_t direction, uint8_t level)
+{
     int16_t base = LineFollow_BaseSpeed();
+    int16_t fast;
+    int16_t slow;
+
+    if (level < 1U) level = 1U;
+    if (level > LF_TURN_LEVEL_MAX) level = LF_TURN_LEVEL_MAX;
+
+    fast = LineFollow_ScaleSpeed(base, lf_turn_ratio[level - 1U].fast_ratio);
+    slow = LineFollow_ScaleSpeed(base, lf_turn_ratio[level - 1U].slow_ratio);
 
     if (direction < 0) {
         lf_state = LF_STATE_TRACK;
         lf_turn_lock = LF_DIR_LEFT;
-        lf_last_diff = (int16_t)(-base);
+        lf_last_diff = (int16_t)(slow - fast);
         lf_last_error = -1000;
-        LineFollow_SetTargets(0, base);
+        LineFollow_SetTargets(slow, fast);
     } else {
         lf_state = LF_STATE_TRACK;
         lf_turn_lock = LF_DIR_RIGHT;
-        lf_last_diff = base;
+        lf_last_diff = (int16_t)(fast - slow);
         lf_last_error = 1000;
-        LineFollow_SetTargets(base, 0);
+        LineFollow_SetTargets(fast, slow);
     }
 }
 
@@ -222,11 +260,40 @@ static void LineFollow_ApplyPattern(uint8_t pattern)
         return;
     }
 
+    switch (pattern) {
+        case LF_PAT_L2_L1_R1:
+            LineFollow_TurnLevel(LF_DIR_LEFT, 1U);
+            return;
+        case LF_PAT_L1_R1_R2:
+            LineFollow_TurnLevel(LF_DIR_RIGHT, 1U);
+            return;
+        case LF_PAT_L1:
+            LineFollow_TurnLevel(LF_DIR_LEFT, 2U);
+            return;
+        case LF_PAT_R1:
+            LineFollow_TurnLevel(LF_DIR_RIGHT, 2U);
+            return;
+        case LF_PAT_L2_L1:
+            LineFollow_TurnLevel(LF_DIR_LEFT, 3U);
+            return;
+        case LF_PAT_R1_R2:
+            LineFollow_TurnLevel(LF_DIR_RIGHT, 3U);
+            return;
+        case LF_PAT_L2:
+            LineFollow_TurnLevel(LF_DIR_LEFT, 4U);
+            return;
+        case LF_PAT_R2:
+            LineFollow_TurnLevel(LF_DIR_RIGHT, 4U);
+            return;
+        default:
+            break;
+    }
+
     direction = LineFollow_DirectionFromPattern(pattern);
     if (direction == LF_DIR_NONE) {
         direction = LineFollow_FallbackDirection();
     }
-    LineFollow_Turn(direction);
+    LineFollow_TurnLevel(direction, 3U);
 }
 
 void LineFollow_Init(void)
