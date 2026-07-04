@@ -25,5 +25,7 @@ int16_t LineFollow_GetTurnLimit(void);
 int16_t LineFollow_GetLastError(void);
 int32_t LineFollow_GetIntegral(void);
 int16_t LineFollow_GetLastDiff(void);
+uint8_t LineFollow_GetBits(void);
+uint8_t LineFollow_GetPattern(void);
 
 #endif

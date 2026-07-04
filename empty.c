@@ -213,7 +213,7 @@ int main(void)
     Stream_Printf("[PIDTUNE] Encoder GPIO: L B02/B03, R B04/B05, t unit=counts/20ms\r\n");
     Stream_Printf("[PIDTUNE] IR ADC1: L2 PA16, L1 PA17, R1 PB17, R2 PB18\r\n");
     Stream_Printf("[PIDTUNE] Commands: t/l/r speed, p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
-    Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT R0-R3,F0-F3,N0-N3,S,E), X ir once, f toggle, u base, w turn, q/a/e line PID\r\n");
+    Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT R0-R3,F0-F3,N0-N3,S,E,B,P), X ir once, f toggle, u base, w turn, q/a/e kept, hardcoded bit FSM\r\n");
     Stream_Printf("[PIDTUNE] USB speed stream: TL,TR,AL,AR,PWML,PWMR,FiltL,FiltR\r\n");
     Stream_Printf("[PIDTUNE] BT speed stream: AL,AR,PWML,PWMR when v from BT\r\n[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
 
