@@ -13,6 +13,10 @@
 /* 20ms 周期下实测满速约 270 counts，留少量余量防止设定值长期不可达。 */
 #define TARGET_MAX_COUNTS_20MS 300
 
+/* Mirror LineFollow.c threshold+hysteresis so x/X can print sensor bits even when f mode is off. */
+#define CMD_IR_ON_THRESHOLD  1000U
+#define CMD_IR_OFF_THRESHOLD 500U
+
 volatile int16_t SpeedL;
 volatile int16_t SpeedR;
 volatile int16_t SpeedFiltL;
@@ -30,6 +34,25 @@ volatile uint8_t g_DisplayMode = 0;
 
 static int16_t cmd_target_l = 0;
 static int16_t cmd_target_r = 0;
+static uint8_t cmd_ir_bits = 0U;
+
+static uint8_t Cmd_UpdateIrBitsFromTrack(const Tracking_Data *track)
+{
+    static const uint8_t bit_mask[TRACK_NUM] = {0x08U, 0x04U, 0x02U, 0x01U};
+    uint8_t i;
+
+    if (track == 0) return cmd_ir_bits;
+
+    for (i = 0U; i < TRACK_NUM; i++) {
+        if (track->filt[i] >= CMD_IR_ON_THRESHOLD) {
+            cmd_ir_bits |= bit_mask[i];
+        } else if (track->filt[i] <= CMD_IR_OFF_THRESHOLD) {
+            cmd_ir_bits &= (uint8_t)(~bit_mask[i]);
+        }
+    }
+
+    return cmd_ir_bits;
+}
 
 static int16_t Clamp_Target(int16_t target)
 {
@@ -76,7 +99,7 @@ static void Print_Params(void)
     Print_Gain("LKp", lkp);
     Print_Gain("LKi", lki);
     Print_Gain("LKd", lkd);
-    Cmd_Printf("ReqL=%d ReqR=%d TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d Run=%d Stream=%d IR=%d LF=%d LFSta=%d LFBase=%d LFTurn=%d LFErr=%d LInt=%ld LDiff=%d LFBits=0x%X LFPat=0x%X BTRX=%lu BTIRQ=%lu Unit=target_counts/20ms FiltL=%d FiltR=%d EncPin=0x%02X EncSumL=%ld EncSumR=%ld\r\n",
+    Cmd_Printf("ReqL=%d ReqR=%d TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d OL=%d OLPwm=%d OLLim=%d Run=%d Stream=%d IR=%d LF=%d LFSta=%d LFBase=%d LFErr=%d LInt=%ld LDiff=%d LFBits=0x%X LFPat=0x%X BTRX=%lu BTIRQ=%lu Unit=target_counts/20ms FiltL=%d FiltR=%d EncPin=0x%02X EncSumL=%ld EncSumR=%ld\r\n",
                   (int)cmd_target_l,
                   (int)cmd_target_r,
                   (int)Motor_GetTarget_L(),
@@ -85,13 +108,15 @@ static void Print_Params(void)
                   (int)Motor_GetActual_R(),
                   (int)Motor_GetPwm_L(),
                   (int)Motor_GetPwm_R(),
+                  (int)Motor_OpenLoop_IsEnabled(),
+                  (int)Motor_OpenLoop_GetPwm(),
+                  (int)Motor_OpenLoop_GetLimit(),
                   (int)g_Run,
                   (int)g_Stream,
                   (int)g_IrStream,
                   (int)LineFollow_IsEnabled(),
                   (int)LineFollow_GetState(),
                   (int)LineFollow_GetBaseSpeed(),
-                  (int)LineFollow_GetTurnLimit(),
                   (int)LineFollow_GetLastError(),
                   (long)LineFollow_GetIntegral(),
                   (int)LineFollow_GetLastDiff(),
@@ -117,8 +142,9 @@ static uint8_t Is_LineCmd(uint8_t c)
             c == 'd' || c == 'D' || c == 't' || c == 'T' ||
             c == 'b' || c == 'B' || c == 'l' || c == 'L' ||
             c == 'r' || c == 'R' || c == 'u' || c == 'U' ||
-            c == 'w' || c == 'W' || c == 'q' || c == 'Q' ||
-            c == 'a' || c == 'A' || c == 'e' || c == 'E');
+            c == 'q' || c == 'Q' ||
+            c == 'a' || c == 'A' || c == 'e' || c == 'E' ||
+            c == 'o' || c == 'O');
 }
 
 static void Parse_TuneLine(char *line)
@@ -177,11 +203,23 @@ static void Parse_TuneLine(char *line)
             g_Run = (value != 0) ? 1U : 0U;
             Apply_Targets();
             break;
+        case 'o':
+            if (LineFollow_IsEnabled()) {
+                LineFollow_Stop();
+            }
+            cmd_target_l = 0;
+            cmd_target_r = 0;
+            if (value == 0) {
+                g_Run = 0U;
+                Motor_OpenLoop_Stop();
+                Timer_ResetSpeedFilter();
+            } else {
+                g_Run = 1U;
+                Motor_OpenLoop_Set(value);
+            }
+            break;
         case 'u':
             LineFollow_SetBaseSpeed(value);
-            break;
-        case 'w':
-            LineFollow_SetTurnLimit(value);
             break;
         default:
             break;
@@ -193,6 +231,8 @@ static void Parse_TuneLine(char *line)
 void CmdDispatch_PrintTracking(uint8_t target)
 {
     const Tracking_Data *track;
+    uint8_t bits;
+    uint8_t pattern;
 
     if (!Tracking_Update()) {
         if (target == STREAM_TARGET_BLUETOOTH) {
@@ -204,23 +244,28 @@ void CmdDispatch_PrintTracking(uint8_t target)
     }
 
     track = Tracking_GetData();
+    bits = Cmd_UpdateIrBitsFromTrack(track);
+    pattern = LineFollow_IsEnabled() ? LineFollow_GetPattern() : bits;
+
     if (target == STREAM_TARGET_BLUETOOTH) {
-        /* Bluetooth 9600 CSV: R0,R1,R2,R3,F0,F1,F2,F3,N0,N1,N2,N3,S,E,B,P. */
-        Bluetooth_Printf("%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u,%u\r\n",
-                         (unsigned int)track->raw[0],
-                         (unsigned int)track->raw[1],
-                         (unsigned int)track->raw[2],
-                         (unsigned int)track->raw[3],
-                         (unsigned int)track->filt[0],
-                         (unsigned int)track->filt[1],
-                         (unsigned int)track->filt[2],
-                         (unsigned int)track->filt[3],
-                         (unsigned int)track->norm[0],
-                         (unsigned int)track->norm[1],
-                         (unsigned int)track->norm[2],
-                         (unsigned int)track->norm[3],
-                         (unsigned int)track->strength,
-                         (int)track->error);
+        /*
+         * Bluetooth 9600 compact CSV for line-follow debug:
+         * L2,L1,R1,R2,Bits,Pat,Sta,Diff,TL,TR,AL,AR
+         * L2/L1/R1/R2 are the threshold+hysteresis 0/1 bits used by the FSM.
+         */
+        Bluetooth_Printf("%u,%u,%u,%u,%u,%u,%u,%d,%d,%d,%d,%d\r\n",
+                         (unsigned int)((bits & 0x08U) ? 1U : 0U),
+                         (unsigned int)((bits & 0x04U) ? 1U : 0U),
+                         (unsigned int)((bits & 0x02U) ? 1U : 0U),
+                         (unsigned int)((bits & 0x01U) ? 1U : 0U),
+                         (unsigned int)bits,
+                         (unsigned int)pattern,
+                         (unsigned int)LineFollow_GetState(),
+                         (int)LineFollow_GetLastDiff(),
+                         (int)Motor_GetTarget_L(),
+                         (int)Motor_GetTarget_R(),
+                         (int)Motor_GetActual_L(),
+                         (int)Motor_GetActual_R());
     } else {
         Serial_Printf("IR raw=%u,%u,%u,%u filt=%u,%u,%u,%u norm=%u,%u,%u,%u Str=%u Err=%d Bits=0x%X Pat=0x%X Valid=%u Pins=L2 PA16,L1 PA17,R1 PB17,R2 PB18\r\n",
                       (unsigned int)track->raw[0],
@@ -237,6 +282,8 @@ void CmdDispatch_PrintTracking(uint8_t target)
                       (unsigned int)track->norm[3],
                       (unsigned int)track->strength,
                       (int)track->error,
+                      (unsigned int)bits,
+                      (unsigned int)pattern,
                       (unsigned int)track->valid);
     }
 }
@@ -259,6 +306,7 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
         if (LineFollow_IsEnabled()) {
             LineFollow_Stop();
         }
+        Motor_OpenLoop_Stop();
         g_Run = 1U;
         Apply_Targets();
         Print_Params();
@@ -290,6 +338,7 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             LineFollow_Stop();
             g_Run = 0U;
         } else {
+            Motor_OpenLoop_Stop();
             LineFollow_Start();
             g_Run = 1U;
         }

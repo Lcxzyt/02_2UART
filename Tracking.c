@@ -93,7 +93,7 @@ void Tracking_Init(void)
     static const DL_ADC12_ClockConfig adc_clock = {
         .clockSel = DL_ADC12_CLOCK_SYSOSC,
         .divideRatio = DL_ADC12_CLOCK_DIVIDE_8,
-        .freqRange = DL_ADC12_CLOCK_FREQ_RANGE_3200_TO_8000,
+        .freqRange = DL_ADC12_CLOCK_FREQ_RANGE_32_TO_40,
     };
     uint8_t i;
 

@@ -19,8 +19,8 @@
 | --- | --- |
 | PWMA | PA27 |
 | PWMB | PA26 |
-| AIN1 | PB7 |
-| AIN2 | PB6 |
+| AIN1 | PB6 |
+| AIN2 | PB7 |
 | BIN1 | PB8 |
 | BIN2 | PB9 |
 

@@ -4,18 +4,18 @@
 
 /*
  * MSPM0 移植版编码器：
- * 左轮 B02=PB2=A、B03=PB3=B；右轮 B04=PB4=A、B05=PB5=B。
+ * 左轮 B04=PB4=A、B05=PB5=B；右轮 B02=PB2=A、B03=PB3=B。
  * 四个输入脚均开内部上拉，A/B 两相都开双边沿中断，用状态表做正交解码。
  * 如果实测前进方向为负数，只改下面的 ENCODER_SIGN_x，不要改控制层。
  */
-#define ENC_L_A_PIN      DL_GPIO_PIN_2
-#define ENC_L_B_PIN      DL_GPIO_PIN_3
-#define ENC_R_A_PIN      DL_GPIO_PIN_4
-#define ENC_R_B_PIN      DL_GPIO_PIN_5
+#define ENC_L_A_PIN      DL_GPIO_PIN_4
+#define ENC_L_B_PIN      DL_GPIO_PIN_5
+#define ENC_R_A_PIN      DL_GPIO_PIN_2
+#define ENC_R_B_PIN      DL_GPIO_PIN_3
 #define ENC_ALL_PINS     (ENC_L_A_PIN | ENC_L_B_PIN | ENC_R_A_PIN | ENC_R_B_PIN)
 
-#define ENCODER_SIGN_L   (-1)
-#define ENCODER_SIGN_R   (+1)
+#define ENCODER_SIGN_L   (+1)
+#define ENCODER_SIGN_R   (-1)
 
 static volatile int32_t enc_count_l = 0;
 static volatile int32_t enc_count_r = 0;
@@ -60,10 +60,10 @@ static void Encoder_ConfigInput(uint32_t pincm)
 
 void Encoder_Init(void)
 {
-    Encoder_ConfigInput(IOMUX_PINCM15);  /* B02/PB2: 左编码器 A */
-    Encoder_ConfigInput(IOMUX_PINCM16);  /* B03/PB3: 左编码器 B */
-    Encoder_ConfigInput(IOMUX_PINCM17);  /* B04/PB4: 右编码器 A */
-    Encoder_ConfigInput(IOMUX_PINCM18);  /* B05/PB5: 右编码器 B */
+    Encoder_ConfigInput(IOMUX_PINCM15);  /* B02/PB2: 右编码器 A */
+    Encoder_ConfigInput(IOMUX_PINCM16);  /* B03/PB3: 右编码器 B */
+    Encoder_ConfigInput(IOMUX_PINCM17);  /* B04/PB4: 左编码器 A */
+    Encoder_ConfigInput(IOMUX_PINCM18);  /* B05/PB5: 左编码器 B */
 
     enc_count_l = 0;
     enc_count_r = 0;

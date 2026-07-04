@@ -12,6 +12,13 @@ void Motor_SoftStart_Update(void);
 
 void Motor_SetTarget_L(int16_t target);
 void Motor_SetTarget_R(int16_t target);
+
+void Motor_OpenLoop_Set(int16_t pwm);
+void Motor_OpenLoop_Stop(void);
+uint8_t Motor_OpenLoop_IsEnabled(void);
+int8_t Motor_OpenLoop_GetPwm(void);
+int8_t Motor_OpenLoop_GetLimit(void);
+
 void Motor_Control_Stop(void);
 void Motor_Control_Update(int16_t measL, int16_t measR);
 

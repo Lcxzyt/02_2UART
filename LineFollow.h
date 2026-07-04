@@ -14,14 +14,12 @@ void LineFollow_Stop(void);
 void LineFollow_Update(void);
 
 void LineFollow_SetBaseSpeed(int16_t speed);
-void LineFollow_SetTurnLimit(int16_t limit);
 void LineFollow_SetTunings(float kp, float ki, float kd);
 void LineFollow_GetTunings(float *kp, float *ki, float *kd);
 
 uint8_t LineFollow_IsEnabled(void);
 uint8_t LineFollow_GetState(void);
 int16_t LineFollow_GetBaseSpeed(void);
-int16_t LineFollow_GetTurnLimit(void);
 int16_t LineFollow_GetLastError(void);
 int32_t LineFollow_GetIntegral(void);
 int16_t LineFollow_GetLastDiff(void);

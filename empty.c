@@ -209,13 +209,13 @@ int main(void)
     Stream_Printf("[PIDTUNE] TIMER_0=TIMG0 period=20ms\r\n");
     Stream_Printf("[PIDTUNE] OLED I2C0 SCL=PA1 SDA=PA0 init=%s\r\n", oled_ok ? "OK" : "FAIL");
     Stream_Printf("[PIDTUNE] IMU I2C0 shared bus: PA1/PA0, use m to test\r\n");
-    Stream_Printf("[PIDTUNE] TB6612 open-loop PWM output enabled. Test with wheels lifted.\r\n");
-    Stream_Printf("[PIDTUNE] Encoder GPIO: L B02/B03, R B04/B05, t unit=counts/20ms\r\n");
+    Stream_Printf("[PIDTUNE] TB6612 PWM: PWMA=PA27(C1), PWMB=PA26(C0), AIN1=PB6 AIN2=PB7 BIN1=PB8 BIN2=PB9\r\n");
+    Stream_Printf("[PIDTUNE] Encoder GPIO: L B04/B05, R B02/B03, t unit=counts/20ms\r\n");
     Stream_Printf("[PIDTUNE] IR ADC1: L2 PA16, L1 PA17, R1 PB17, R2 PB18\r\n");
-    Stream_Printf("[PIDTUNE] Commands: t/l/r speed, p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
-    Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT R0-R3,F0-F3,N0-N3,S,E,B,P), X ir once, f toggle, u base, w turn, q/a/e kept, hardcoded bit FSM\r\n");
+    Stream_Printf("[PIDTUNE] Commands: t/l/r speed, o pwm open-loop, p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
+    Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT bits/pattern/state/diff/TL/TR/AL/AR), X ir once, f toggle, u base, q/a/e kept, lock-turn 0/base FSM\r\n");
     Stream_Printf("[PIDTUNE] USB speed stream: TL,TR,AL,AR,PWML,PWMR,FiltL,FiltR\r\n");
-    Stream_Printf("[PIDTUNE] BT speed stream: AL,AR,PWML,PWMR when v from BT\r\n[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
+    Stream_Printf("[PIDTUNE] BT speed stream: AL,AR,PWML,PWMR when v from BT; use o20/o30/... to map PWM to speed\r\n[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
 
     Show_WaitScreen(oled_ok);
 
