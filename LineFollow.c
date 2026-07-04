@@ -3,7 +3,7 @@
 #include "Motor.h"
 
 #define LF_TARGET_LIMIT 300
-#define LF_BASE_SPEED_DEFAULT 40
+#define LF_BASE_SPEED_DEFAULT 30
 
 /*
  * Four-channel black/white thresholds. The FSM uses filtered ADC values F0-F3.

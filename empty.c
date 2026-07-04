@@ -8,6 +8,8 @@
 #include "Timer.h"
 #include "Tracking.h"
 #include "LineFollow.h"
+#include "Heading.h"
+#include "HeadingDrive.h"
 #include "IMUTest.h"
 #include "delay.h"
 #include <stdbool.h>
@@ -19,6 +21,8 @@
 #define OLED_UPDATE_TICKS 1U
 /* 红外蓝牙日志只用于观察，100ms 一次足够看状态，同时避免拖慢主循环。 */
 #define IR_STREAM_PRINT_TICKS 5U
+/* 航向状态流同样降到 100ms，避免 9600 蓝牙输出拖慢控制。 */
+#define HEADING_STREAM_PRINT_TICKS 5U
 #define DISPLAY_LAYOUT_WAIT 0U
 #define DISPLAY_LAYOUT_SPEED 1U
 #define DISPLAY_LAYOUT_IMU 2U
@@ -289,6 +293,7 @@ int main(void)
 {
     uint8_t oled_tick = 0U;
     uint8_t ir_stream_tick = 0U;
+    uint8_t heading_stream_tick = 0U;
     bool oled_ok;
 
     SYSCFG_DL_init();
@@ -300,6 +305,8 @@ int main(void)
     Encoder_Init();
     Tracking_Init();
     LineFollow_Init();
+    (void)Heading_Init();
+    HeadingDrive_Init();
     Motor_Control_Stop();
 
     Timer_Init();
@@ -317,6 +324,7 @@ int main(void)
     Stream_Printf("[PIDTUNE] IR ADC1: L2 PA16, L1 PA17, R1 PB17, R2 PB18\r\n");
     Stream_Printf("[PIDTUNE] Commands: t/l/r speed, o pwm open-loop, p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
     Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT bits/pattern/state/diff/TL/TR/AL/AR), X ir once, f toggle, u base, q/a/e kept, 4-level ratio FSM\r\n");
+    Stream_Printf("[PIDTUNE] Heading drive: h toggle blank-straight, y stream 100ms, Y heading once, j/k/n heading PID, g diff limit, z output sign, c gyro sign\r\n");
     Stream_Printf("[PIDTUNE] USB speed stream: TL,TR,AL,AR,PWML,PWMR,FiltL,FiltR\r\n");
     Stream_Printf("[PIDTUNE] BT speed stream: AL,AR,PWML,PWMR when v from BT; use o20/o30/... to map PWM to speed\r\n[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
 
@@ -341,6 +349,8 @@ int main(void)
             /* 红外 ADC 不放进中断；主循环按 20ms 节拍算下一拍左右轮目标速度。 */
             if (LineFollow_IsEnabled()) {
                 LineFollow_Update();
+            } else if (HeadingDrive_IsEnabled()) {
+                HeadingDrive_Update();
             }
 
             /* 红外连续流用于看传感器状态变化；采样仍是 20ms，日志降到 100ms。 */
@@ -353,15 +363,27 @@ int main(void)
             } else {
                 ir_stream_tick = 0U;
             }
+
+            if (g_HeadingStream) {
+                heading_stream_tick++;
+                if (heading_stream_tick >= HEADING_STREAM_PRINT_TICKS) {
+                    heading_stream_tick = 0U;
+                    CmdDispatch_PrintHeading(g_HeadingStreamTarget);
+                }
+            } else {
+                heading_stream_tick = 0U;
+            }
+
             /* 巡线时保持主循环轻量；速度流会抢占主循环时间，调试巡线请用 100ms 的 x 流。 */
-            if (g_Stream && (!LineFollow_IsEnabled()) && (g_DisplayMode == 1U)) {
+            if (g_Stream && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled()) && (g_DisplayMode == 1U)) {
                 Print_ImuData();
             }
 
-            if ((!g_IrStream) && (!LineFollow_IsEnabled())) {
+            if ((!g_IrStream) && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled())) {
                 oled_tick++;
             }
-            if ((!g_IrStream) && (!LineFollow_IsEnabled()) && (oled_tick >= OLED_UPDATE_TICKS)) {
+            if ((!g_IrStream) && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled()) &&
+                (oled_tick >= OLED_UPDATE_TICKS)) {
                 oled_tick = 0U;
                 if (g_DisplayMode == 1U) {
                     if (g_Stream) {
@@ -375,7 +397,7 @@ int main(void)
                 }
             }
 
-            if (g_Stream && (!LineFollow_IsEnabled()) && (g_DisplayMode != 1U)) {
+            if (g_Stream && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled()) && (g_DisplayMode != 1U)) {
                 Print_VofaData();
             }
         }

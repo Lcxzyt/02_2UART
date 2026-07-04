@@ -2,6 +2,8 @@
 #include "Motor.h"
 #include "Encoder.h"
 #include "Bluetooth.h"
+#include "Heading.h"
+#include "HeadingDrive.h"
 #include "IMUTest.h"
 #include "LineFollow.h"
 #include "Serial.h"
@@ -28,6 +30,8 @@ volatile uint8_t g_Stream = 0;
 volatile uint8_t g_StreamTarget = STREAM_TARGET_NONE;
 volatile uint8_t g_IrStream = 0;
 volatile uint8_t g_IrStreamTarget = STREAM_TARGET_NONE;
+volatile uint8_t g_HeadingStream = 0;
+volatile uint8_t g_HeadingStreamTarget = STREAM_TARGET_NONE;
 volatile uint8_t g_DisplayDirty = 0;
 volatile uint8_t g_ImuDisplayDirty = 0;
 volatile uint8_t g_DisplayMode = 0;
@@ -66,6 +70,9 @@ static void Apply_Targets(void)
     if (LineFollow_IsEnabled()) {
         LineFollow_Stop();
     }
+    if (HeadingDrive_IsEnabled()) {
+        HeadingDrive_Stop();
+    }
 
     if (!g_Run) {
         Motor_Control_Stop();
@@ -90,8 +97,11 @@ static void Print_Params(void)
 {
     float kp, ki, kd;
     float lkp, lki, lkd;
+    float hkp, hki, hkd;
+    const Heading_Data *heading = Heading_GetData();
     Motor_PID_GetTunings(&kp, &ki, &kd);
     LineFollow_GetTunings(&lkp, &lki, &lkd);
+    HeadingDrive_GetTunings(&hkp, &hki, &hkd);
 
     Print_Gain("Kp", kp);
     Print_Gain("Ki", ki);
@@ -99,36 +109,65 @@ static void Print_Params(void)
     Print_Gain("LKp", lkp);
     Print_Gain("LKi", lki);
     Print_Gain("LKd", lkd);
-    Cmd_Printf("ReqL=%d ReqR=%d TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d OL=%d OLPwm=%d OLLim=%d Run=%d Stream=%d IR=%d LF=%d LFSta=%d LFBase=%d LFErr=%d LInt=%ld LDiff=%d LFBits=0x%X LFPat=0x%X BTRX=%lu BTIRQ=%lu Unit=target_counts/20ms FiltL=%d FiltR=%d EncPin=0x%02X EncSumL=%ld EncSumR=%ld\r\n",
-                  (int)cmd_target_l,
-                  (int)cmd_target_r,
-                  (int)Motor_GetTarget_L(),
-                  (int)Motor_GetTarget_R(),
-                  (int)Motor_GetActual_L(),
-                  (int)Motor_GetActual_R(),
-                  (int)Motor_GetPwm_L(),
-                  (int)Motor_GetPwm_R(),
-                  (int)Motor_OpenLoop_IsEnabled(),
-                  (int)Motor_OpenLoop_GetPwm(),
-                  (int)Motor_OpenLoop_GetLimit(),
-                  (int)g_Run,
-                  (int)g_Stream,
-                  (int)g_IrStream,
-                  (int)LineFollow_IsEnabled(),
-                  (int)LineFollow_GetState(),
-                  (int)LineFollow_GetBaseSpeed(),
-                  (int)LineFollow_GetLastError(),
-                  (long)LineFollow_GetIntegral(),
-                  (int)LineFollow_GetLastDiff(),
-                  (unsigned int)LineFollow_GetBits(),
-                  (unsigned int)LineFollow_GetPattern(),
-                  (unsigned long)Bluetooth_GetRxCount(),
-                  (unsigned long)Bluetooth_GetIrqCount(),
-                  (int)SpeedFiltL,
-                  (int)SpeedFiltR,
-                  (unsigned int)Encoder_GetPinState(),
-                  (long)Encoder_GetTotal_L(),
-                  (long)Encoder_GetTotal_R());
+    Print_Gain("HKp", hkp);
+    Print_Gain("HKi", hki);
+    Print_Gain("HKd", hkd);
+    Cmd_Printf("\r\n");
+
+    Cmd_Printf("ReqL=%d ReqR=%d TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d Run=%d Stream=%d IR=%d HS=%d Unit=target_counts/20ms\r\n",
+               (int)cmd_target_l,
+               (int)cmd_target_r,
+               (int)Motor_GetTarget_L(),
+               (int)Motor_GetTarget_R(),
+               (int)Motor_GetActual_L(),
+               (int)Motor_GetActual_R(),
+               (int)Motor_GetPwm_L(),
+               (int)Motor_GetPwm_R(),
+               (int)g_Run,
+               (int)g_Stream,
+               (int)g_IrStream,
+               (int)g_HeadingStream);
+    Cmd_Printf("OL=%d OLPwm=%d OLLim=%d FiltL=%d FiltR=%d EncPin=0x%02X EncSumL=%ld EncSumR=%ld BTRX=%lu BTIRQ=%lu\r\n",
+               (int)Motor_OpenLoop_IsEnabled(),
+               (int)Motor_OpenLoop_GetPwm(),
+               (int)Motor_OpenLoop_GetLimit(),
+               (int)SpeedFiltL,
+               (int)SpeedFiltR,
+               (unsigned int)Encoder_GetPinState(),
+               (long)Encoder_GetTotal_L(),
+               (long)Encoder_GetTotal_R(),
+               (unsigned long)Bluetooth_GetRxCount(),
+               (unsigned long)Bluetooth_GetIrqCount());
+    Cmd_Printf("LF=%d LFSta=%d LFBase=%d LFErr=%d LInt=%ld LDiff=%d LFBits=0x%X LFPat=0x%X\r\n",
+               (int)LineFollow_IsEnabled(),
+               (int)LineFollow_GetState(),
+               (int)LineFollow_GetBaseSpeed(),
+               (int)LineFollow_GetLastError(),
+               (long)LineFollow_GetIntegral(),
+               (int)LineFollow_GetLastDiff(),
+               (unsigned int)LineFollow_GetBits(),
+               (unsigned int)LineFollow_GetPattern());
+    Cmd_Printf("HD=%d HDSta=%d HBase=%d HLim=%d HYaw=%d HMag=%d HTgt=%d HErr=%d HDiff=%d HInt=%ld HCal=%u\r\n",
+               (int)HeadingDrive_IsEnabled(),
+               (int)HeadingDrive_GetState(),
+               (int)HeadingDrive_GetBaseSpeed(),
+               (int)HeadingDrive_GetDiffLimit(),
+               (int)HeadingDrive_GetCurrentYaw(),
+               (int)Heading_GetMagYawDeg(),
+               (int)HeadingDrive_GetTargetYaw(),
+               (int)HeadingDrive_GetErrorDeg(),
+               (int)HeadingDrive_GetLastDiff(),
+               (long)HeadingDrive_GetIntegral(),
+               (unsigned int)Heading_GetCalProgress());
+    Cmd_Printf("HMpu=%u HMagOk=%u HGz=%d HBias=%d HZSign=%d HDSign=%d HYawF=%d HSta=%u\r\n",
+               (unsigned int)heading->mpu_ok,
+               (unsigned int)heading->mag_ok,
+               (int)heading->gyro_z_raw,
+               (int)heading->gyro_z_bias,
+               (int)heading->gyro_z_sign,
+               (int)HeadingDrive_GetOutputSign(),
+               (int)Heading_GetYawDeg(),
+               (unsigned int)Heading_GetState());
     if (g_DisplayMode == 1U) {
         g_ImuDisplayDirty = 1U;
     } else {
@@ -144,6 +183,9 @@ static uint8_t Is_LineCmd(uint8_t c)
             c == 'r' || c == 'R' || c == 'u' || c == 'U' ||
             c == 'q' || c == 'Q' ||
             c == 'a' || c == 'A' || c == 'e' || c == 'E' ||
+            c == 'j' || c == 'J' || c == 'k' || c == 'K' ||
+            c == 'n' || c == 'N' || c == 'g' || c == 'G' ||
+            c == 'z' || c == 'Z' || c == 'c' || c == 'C' ||
             c == 'o' || c == 'O');
 }
 
@@ -151,12 +193,14 @@ static void Parse_TuneLine(char *line)
 {
     float kp, ki, kd;
     float lkp, lki, lkd;
+    float hkp, hki, hkd;
     int16_t value;
     char c = line[0];
     if (c >= 'A' && c <= 'Z') c += 32;
 
     Motor_PID_GetTunings(&kp, &ki, &kd);
     LineFollow_GetTunings(&lkp, &lki, &lkd);
+    HeadingDrive_GetTunings(&hkp, &hki, &hkd);
     value = Clamp_Target((int16_t)atoi(line + 1));
 
     switch (c) {
@@ -183,6 +227,27 @@ static void Parse_TuneLine(char *line)
         case 'e':
             lkd = (float)atof(line + 1);
             LineFollow_SetTunings(lkp, lki, lkd);
+            break;
+        case 'j':
+            hkp = (float)atof(line + 1);
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'k':
+            hki = (float)atof(line + 1);
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'n':
+            hkd = (float)atof(line + 1);
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'g':
+            HeadingDrive_SetDiffLimit(value);
+            break;
+        case 'z':
+            HeadingDrive_SetOutputSign((int8_t)atoi(line + 1));
+            break;
+        case 'c':
+            Heading_SetGyroZSign((int8_t)atoi(line + 1));
             break;
         case 't':
         case 'b':
@@ -220,6 +285,7 @@ static void Parse_TuneLine(char *line)
             break;
         case 'u':
             LineFollow_SetBaseSpeed(value);
+            HeadingDrive_SetBaseSpeed(value);
             break;
         default:
             break;
@@ -300,6 +366,49 @@ void CmdDispatch_PrintTracking(uint8_t target)
     }
 }
 
+void CmdDispatch_PrintHeading(uint8_t target)
+{
+    if (!HeadingDrive_IsEnabled()) {
+        (void)Heading_Update();
+    }
+
+    if (target == STREAM_TARGET_BLUETOOTH) {
+        /*
+         * Bluetooth 9600 compact CSV:
+         * HYaw,HTgt,HErr,HDiff,TL,TR,AL,AR
+         */
+        Bluetooth_Printf("%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                         (int)Heading_GetYawDeg(),
+                         (int)HeadingDrive_GetTargetYaw(),
+                         (int)HeadingDrive_GetErrorDeg(),
+                         (int)HeadingDrive_GetLastDiff(),
+                         (int)Motor_GetTarget_L(),
+                         (int)Motor_GetTarget_R(),
+                         (int)Motor_GetActual_L(),
+                         (int)Motor_GetActual_R());
+    } else {
+        /*
+         * USB CSV:
+         * HD,Sta,Cal,HYaw,HMag,HTgt,HErr,HDiff,TL,TR,AL,AR,PL,PR
+         */
+        Serial_Printf("%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                      (unsigned int)HeadingDrive_IsEnabled(),
+                      (unsigned int)HeadingDrive_GetState(),
+                      (unsigned int)Heading_GetCalProgress(),
+                      (int)Heading_GetYawDeg(),
+                      (int)Heading_GetMagYawDeg(),
+                      (int)HeadingDrive_GetTargetYaw(),
+                      (int)HeadingDrive_GetErrorDeg(),
+                      (int)HeadingDrive_GetLastDiff(),
+                      (int)Motor_GetTarget_L(),
+                      (int)Motor_GetTarget_R(),
+                      (int)Motor_GetActual_L(),
+                      (int)Motor_GetActual_R(),
+                      (int)Motor_GetPwm_L(),
+                      (int)Motor_GetPwm_R());
+    }
+}
+
 #define LINE_BUF_SIZE 64U
 
 static char tune_line[LINE_BUF_SIZE];
@@ -323,12 +432,18 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
         Apply_Targets();
         Print_Params();
     } else if (ch == 'v' || ch == 'V') {
-        if (LineFollow_IsEnabled()) {
+        if (LineFollow_IsEnabled() || HeadingDrive_IsEnabled()) {
             g_Stream = 0U;
             g_StreamTarget = STREAM_TARGET_NONE;
         } else {
             g_Stream ^= 1U;
             g_StreamTarget = g_Stream ? source : STREAM_TARGET_NONE;
+            if (g_Stream) {
+                g_IrStream = 0U;
+                g_IrStreamTarget = STREAM_TARGET_NONE;
+                g_HeadingStream = 0U;
+                g_HeadingStreamTarget = STREAM_TARGET_NONE;
+            }
         }
         Print_Params();
     } else if (ch == '?') {
@@ -340,26 +455,63 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
         } else {
             g_DisplayDirty = 1U;
         }
+    } else if (ch == 'y') {
+        g_HeadingStream ^= 1U;
+        g_HeadingStreamTarget = g_HeadingStream ? source : STREAM_TARGET_NONE;
+        if (g_HeadingStream) {
+            g_Stream = 0U;
+            g_StreamTarget = STREAM_TARGET_NONE;
+            g_IrStream = 0U;
+            g_IrStreamTarget = STREAM_TARGET_NONE;
+        }
+        Print_Params();
     } else if (ch == 'x') {
         g_IrStream ^= 1U;
         g_IrStreamTarget = g_IrStream ? source : STREAM_TARGET_NONE;
         if (g_IrStream) {
             g_Stream = 0U;
             g_StreamTarget = STREAM_TARGET_NONE;
+            g_HeadingStream = 0U;
+            g_HeadingStreamTarget = STREAM_TARGET_NONE;
         }
         Print_Params();
     } else if (ch == 'X') {
         CmdDispatch_PrintTracking(source);
+    } else if (ch == 'Y') {
+        (void)Heading_Update();
+        Print_Params();
     } else if (ch == 'f' || ch == 'F') {
         if (LineFollow_IsEnabled()) {
             LineFollow_Stop();
             g_Run = 0U;
         } else {
+            if (HeadingDrive_IsEnabled()) {
+                HeadingDrive_Stop();
+            }
             Motor_OpenLoop_Stop();
             LineFollow_Start();
             g_Run = 1U;
             g_Stream = 0U;
             g_StreamTarget = STREAM_TARGET_NONE;
+            g_HeadingStream = 0U;
+            g_HeadingStreamTarget = STREAM_TARGET_NONE;
+        }
+        Print_Params();
+    } else if (ch == 'h' || ch == 'H') {
+        if (HeadingDrive_IsEnabled()) {
+            HeadingDrive_Stop();
+            g_Run = 0U;
+        } else {
+            if (LineFollow_IsEnabled()) {
+                LineFollow_Stop();
+            }
+            Motor_OpenLoop_Stop();
+            HeadingDrive_Start();
+            g_Run = 1U;
+            g_Stream = 0U;
+            g_StreamTarget = STREAM_TARGET_NONE;
+            g_IrStream = 0U;
+            g_IrStreamTarget = STREAM_TARGET_NONE;
         }
         Print_Params();
     }
