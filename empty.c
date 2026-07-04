@@ -1,4 +1,4 @@
-﻿#include "ti_msp_dl_config.h"
+#include "ti_msp_dl_config.h"
 #include "Serial.h"
 #include "Bluetooth.h"
 #include "OLED.h"
@@ -6,6 +6,8 @@
 #include "Encoder.h"
 #include "CmdDispatch.h"
 #include "Timer.h"
+#include "Tracking.h"
+#include "LineFollow.h"
 #include "IMUTest.h"
 #include "delay.h"
 #include <stdbool.h>
@@ -15,6 +17,8 @@
 
 /* OLED 只作为观察窗口，不要把控制周期绑定到这个刷新频率。 */
 #define OLED_UPDATE_TICKS 1U
+/* 红外蓝牙日志只用于观察，100ms 一次足够看状态，同时避免拖慢主循环。 */
+#define IR_STREAM_PRINT_TICKS 5U
 #define DISPLAY_LAYOUT_WAIT 0U
 #define DISPLAY_LAYOUT_SPEED 1U
 #define DISPLAY_LAYOUT_IMU 2U
@@ -181,6 +185,7 @@ static void Print_ImuData(void)
 int main(void)
 {
     uint8_t oled_tick = 0U;
+    uint8_t ir_stream_tick = 0U;
     bool oled_ok;
 
     SYSCFG_DL_init();
@@ -190,6 +195,8 @@ int main(void)
     Bluetooth_SendString("BT OK\r\n");  /* Test BT transmission */
     Motor_Init();
     Encoder_Init();
+    Tracking_Init();
+    LineFollow_Init();
     Motor_Control_Stop();
 
     Timer_Init();
@@ -204,7 +211,9 @@ int main(void)
     Stream_Printf("[PIDTUNE] IMU I2C0 shared bus: PA1/PA0, use m to test\r\n");
     Stream_Printf("[PIDTUNE] TB6612 open-loop PWM output enabled. Test with wheels lifted.\r\n");
     Stream_Printf("[PIDTUNE] Encoder GPIO: L B02/B03, R B04/B05, t unit=counts/20ms\r\n");
-    Stream_Printf("[PIDTUNE] Commands: t/l/r speed(counts/20ms), p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
+    Stream_Printf("[PIDTUNE] IR ADC1: L2 PA16, L1 PA17, R1 PB17, R2 PB18\r\n");
+    Stream_Printf("[PIDTUNE] Commands: t/l/r speed, p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
+    Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT R0-R3,F0-F3,N0-N3,S,E), X ir once, f toggle, u base, w turn, q/a/e line PID\r\n");
     Stream_Printf("[PIDTUNE] USB speed stream: TL,TR,AL,AR,PWML,PWMR,FiltL,FiltR\r\n");
     Stream_Printf("[PIDTUNE] BT speed stream: AL,AR,PWML,PWMR when v from BT\r\n[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
 
@@ -226,13 +235,30 @@ int main(void)
         if (g_SampleReady) {
             g_SampleReady = 0U;
 
+            /* 红外 ADC 不放进中断；主循环按 20ms 节拍算下一拍左右轮目标速度。 */
+            if (LineFollow_IsEnabled()) {
+                LineFollow_Update();
+            }
+
+            /* 红外连续流用于看传感器状态变化；采样仍是 20ms，日志降到 100ms。 */
+            if (g_IrStream) {
+                ir_stream_tick++;
+                if (ir_stream_tick >= IR_STREAM_PRINT_TICKS) {
+                    ir_stream_tick = 0U;
+                    CmdDispatch_PrintTracking(g_IrStreamTarget);
+                }
+            } else {
+                ir_stream_tick = 0U;
+            }
             /* 和 STM32 原工程一致：中断里完成测速/控制，主循环只刷固定显示字段和串口波形。 */
             if (g_Stream && (g_DisplayMode == 1U)) {
                 Print_ImuData();
             }
 
-            oled_tick++;
-            if (oled_tick >= OLED_UPDATE_TICKS) {
+            if (!g_IrStream) {
+                oled_tick++;
+            }
+            if ((!g_IrStream) && (oled_tick >= OLED_UPDATE_TICKS)) {
                 oled_tick = 0U;
                 if (g_DisplayMode == 1U) {
                     if (g_Stream) {

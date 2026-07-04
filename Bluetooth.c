@@ -47,7 +47,9 @@ static void Bluetooth_DrainRx(void)
 
 void Bluetooth_PollRx(void)
 {
+    NVIC_DisableIRQ(BT_UART_INST_INT_IRQN);
     Bluetooth_DrainRx();
+    NVIC_EnableIRQ(BT_UART_INST_INT_IRQN);
 }
 
 uint32_t Bluetooth_GetRxCount(void)
