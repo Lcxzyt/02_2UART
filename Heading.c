@@ -1,23 +1,19 @@
 #include "Heading.h"
 #include "IMU.h"
+#include <math.h>
 
 #define HEADING_SAMPLE_PERIOD_SEC (0.02f)
 #define HEADING_DT_MIN_SEC        (0.001f)
 #define HEADING_DT_MAX_SEC        (0.200f)
-/* Glitch guard: reject/limit single-sample yaw jumps faster than this rate.
-   Real intentional turns measured so far (~10 deg/s hand turn, in-place
-   mag-cal spin) are far below this; corrupted I2C reads during driving
-   produced jumps equivalent to several hundred deg/s, so 250 deg/s is a
-   safe ceiling that still lets genuine fast rotation through gradually. */
-#define HEADING_YAW_MAX_RATE_DEG_PER_SEC (250.0f)
-/* Light low-pass on top of the rate guard above. The rate guard only stops
-   single-frame spikes; everyday magnetometer/vibration noise that stays
-   under that ceiling was still being applied to yaw_deg 1:1, which showed
-   up as the fused heading wandering a few degrees in no fixed direction
-   while actually driving (confirmed non-directional, so this is noise, not
-   a real mechanical bias). Blending in only a fraction of each new sample
-   damps that noise while still tracking real turns within a few ticks. */
-#define HEADING_YAW_SMOOTH_ALPHA (0.30f)
+/* MPU6050 gyro: ±2000 deg/s → 16.4 LSB/(deg/s). */
+#define HEADING_GYRO_LSB_PER_DPS  (16.4f)
+/* Gyro-z sign: +1 or -1, set via Heading_SetGyroZSign(). */
+/* Mag correction: when mag is within this gate of the gyro-predicted
+   heading, slowly nudge the fused heading toward the mag reading.
+   Outside the gate (e.g. during fast turns / motor EMI) trust the
+   gyro alone. */
+#define HEADING_MAG_CORR_ALPHA     (0.005f)
+#define HEADING_MAG_GATE_DEG       (30.0f)
 
 static Heading_Data heading_data = {0};
 static uint8_t heading_initialized = 0U;
@@ -85,7 +81,7 @@ bool Heading_Init(void)
     uint8_t ok;
 
     if (old_sign == 0) {
-        old_sign = 1;
+        old_sign = -1;
     }
 
     heading_data.yaw_deg = 0;
@@ -173,28 +169,39 @@ bool Heading_UpdateWithDt(float dt_sec)
 
     heading_data.mag_yaw_deg = Heading_RoundNormalize(heading_attitude.Yaw);
 
-    /* mag_yaw_deg above stays the raw, unfiltered tilt-compensated compass
-       reading (kept for diagnostics / HMag). yaw_deg is what the controller
-       actually uses, and gets a simple max-rate guard so a single corrupted
-       I2C sample (motor EMI / vibration during driving) can't shove the fused
-       heading tens of degrees in one 20ms tick. First sample after
-       Heading_Init() is seeded directly since there is no prior value yet. */
+    /* Fused heading: gyro integration for fast response, mag for slow
+       drift correction.  Gyro responds instantly to rotation; mag is
+       only used when its reading is close to the gyro prediction
+       (within HEADING_MAG_GATE_DEG).  During curves or motor EMI the
+       mag will be outside the gate and the gyro runs alone, avoiding
+       the lag that a pure-mag filter would introduce. */
     if (!heading_yaw_seeded) {
         heading_data.yaw_deg = heading_data.mag_yaw_deg;
         heading_yaw_seeded = 1U;
     } else {
-        float max_step = HEADING_YAW_MAX_RATE_DEG_PER_SEC * dt_sec;
-        float step = Heading_AngleDiffFloat((float)heading_data.mag_yaw_deg,
-                                             (float)heading_data.yaw_deg);
+        float gyro_dps;
+        float predicted;
+        float mag_err;
 
-        if (step > max_step) {
-            step = max_step;
-        } else if (step < -max_step) {
-            step = -max_step;
+        /* gyro_z_raw is raw LSB; convert to deg/s. */
+        gyro_dps = (float)heading_data.gyro_z_raw
+                   * (1.0f / HEADING_GYRO_LSB_PER_DPS)
+                   * (float)heading_data.gyro_z_sign;
+
+        predicted = (float)heading_data.yaw_deg + gyro_dps * dt_sec;
+
+        mag_err = Heading_AngleDiffFloat((float)heading_data.mag_yaw_deg,
+                                         predicted);
+
+        if (fabsf(mag_err) <= HEADING_MAG_GATE_DEG) {
+            /* Mag is trustworthy – slowly nudge toward it. */
+            heading_data.yaw_deg =
+                Heading_RoundNormalize(predicted
+                                       + HEADING_MAG_CORR_ALPHA * mag_err);
+        } else {
+            /* Mag is likely disturbed (turn / EMI) – trust gyro alone. */
+            heading_data.yaw_deg = Heading_RoundNormalize(predicted);
         }
-
-        heading_data.yaw_deg = Heading_RoundNormalize((float)heading_data.yaw_deg
-                                                       + (HEADING_YAW_SMOOTH_ALPHA * step));
     }
 
     if (heading_data.cal_progress == 0U) {
