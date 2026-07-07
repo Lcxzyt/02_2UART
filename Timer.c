@@ -60,6 +60,9 @@ void TIMER_0_INST_IRQHandler(void)
             } else {
                 Motor_Control_Stop();
             }
+            if (g_SampleTicks < 10U) {
+                g_SampleTicks++;
+            }
             g_SampleReady = 1U;
             break;
         default:

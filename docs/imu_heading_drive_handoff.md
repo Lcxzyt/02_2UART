@@ -31,7 +31,7 @@
 ```text
 MPU6050 gyro_z + QMC5883L mag_yaw
     ↓
-Heading 互补航向：gyro 短时积分 + mag 慢速校正
+Heading 互补航向：gyro 按实际采样间隔短时积分 + mag 门限慢速校正/低速重捕获
     ↓
 HeadingDrive 航向外环：航向误差 -> 左右轮目标速度差
     ↓
@@ -80,13 +80,21 @@ TB6612 + 编码电机
 
 - `h` 开启航向直行时，会调用 `Heading_StartCalibration()`。
 - 若已初始化过，会重新 `IMUTest_Init()`，提高磁力计上电/偶发失败后的恢复概率。
+- `IMUTest_Init()` 会清空 IMU EMA 滤波状态，避免上一次旋转后的滤波残留影响下一次校准。
 - 校准阶段采集约 `60` 个 20ms 周期的 `gyro_z`，即约 1.2s，计算零偏。
 - 校准完成后用当前磁航向初始化融合航向。
 - 运行阶段：
 
 ```text
+dt = elapsed_20ms_ticks * 0.020
 predicted = last_yaw + (gyro_z - bias) * sign * dt / 16.4
-fused_yaw = predicted + alpha * angle_diff(mag_yaw, predicted)
+mag_err = angle_diff(mag_yaw, predicted)
+if abs(mag_err) <= mag_gate:
+    fused_yaw = predicted + alpha * mag_err
+elif abs(gyro_z - bias) <= gyro_still_raw and abs(mag_err) <= mag_reacq_gate:
+    fused_yaw = predicted + reacq_alpha * mag_err
+else:
+    fused_yaw = predicted
 ```
 
 当前参数：
@@ -95,7 +103,11 @@ fused_yaw = predicted + alpha * angle_diff(mag_yaw, predicted)
 #define HEADING_BIAS_SAMPLE_COUNT 60U
 #define HEADING_SAMPLE_PERIOD_SEC 0.020f
 #define HEADING_GYRO_LSB_PER_DPS  16.4f
-#define HEADING_MAG_CORR_ALPHA    0.050f
+#define HEADING_MAG_CORR_ALPHA          0.010f
+#define HEADING_MAG_REACQ_ALPHA          0.020f
+#define HEADING_MAG_GATE_DEG             25.0f
+#define HEADING_MAG_REACQ_GATE_DEG       120.0f
+#define HEADING_GYRO_STILL_RAW           120
 ```
 
 ### `HeadingDrive.c/h`
@@ -167,7 +179,13 @@ Kd = 0.250
 蓝牙短格式：
 
 ```text
-HYaw,HTgt,HErr,HDiff,TL,TR,AL,AR
+HYaw,HMag,HTgt,HErr,HDiff,TL,TR,AL,AR,HGz
+```
+
+磁力计校准短格式（`C` 开关，100ms）：
+
+```text
+MX,MY,MZ,MinX,MaxX,MinY,MaxY,MinZ,MaxZ
 ```
 
 USB 完整格式：
@@ -181,8 +199,9 @@ HD,Sta,Cal,HYaw,HMag,HTgt,HErr,HDiff,TL,TR,AL,AR,PL,PR
 - `HD`：航向直行是否开启。
 - `Sta`：航向直行状态，`0 idle / 1 calibrating / 2 run / 3 sensor_fail`。
 - `Cal`：gyro 零偏校准进度百分比。
-- `HYaw`：融合航向角。
+- `HYaw`：融合航向角，是真正用于航向控制的角度。
 - `HMag`：磁力计计算的航向角。
+- `?` 参数页中的 `HCur`：航向控制器内部当前航向；航向模式关闭后可能停留在上一次控制值，仅作控制器状态参考。
 - `HTgt`：锁定的目标航向角。
 - `HErr`：目标航向与当前航向差，范围约 `-180~180`。
 - `HDiff`：航向外环输出差速。
@@ -219,7 +238,7 @@ if (LineFollow_IsEnabled()) {
 
 - 不跑 OLED 周期刷新。
 - 不跑普通 `v` 速度流。
-- `y` 航向流只 100ms 一次。
+- `y` 航向流内部按主循环实际采样 tick 计算 `dt` 更新航向，只是 100ms 打印一次。
 
 ### `README.md`
 
@@ -358,10 +377,10 @@ h
 ## 风险点
 
 1. 磁力计可能受电机、电流线、铁件影响。
-   如果电机一转 `HMag` 大幅跳动，单纯磁航向会不可靠，需要降低磁校正权重或改进安装/走线。
+   如果电机一转 `HMag` 大幅跳动，单纯磁航向会不可靠；当前已降低磁校正权重并加入 25° 门限，但仍应优先改进安装/走线。
 
-2. `Heading.c` 目前假设 20ms 更新周期。
-   如果主循环被严重阻塞，gyro 积分 `dt` 会不准。当前已关闭航向模式下 OLED 周期刷新和普通流，风险较低。
+2. `Heading.c` 已支持按主循环累计的 20ms tick 计算实际 `dt`。
+   如果主循环偶发超过一个采样周期，gyro 积分会按累计 tick 补偿；但若 I2C 长时间阻塞到超过 200ms，仍会被限幅，需继续检查总线。
 
 3. `Debug/` 构建文件被 `.gitignore` 忽略。
    当前本机编译已通过，但换机器/重新生成工程后，如果命令行构建漏掉 `Heading.c/HeadingDrive.c`，需要在 CCS 工程中确认两个源文件已纳入构建。
@@ -391,3 +410,9 @@ docs/imu_heading_drive_handoff.md
 empty.syscfg
 Debug/*
 ```
+
+### 磁力计校准采集命令
+
+- `C`：磁力计校准采集流开关。开启时重置 min/max。
+- 输出：`MX,MY,MZ,MinX,MaxX,MinY,MaxY,MinZ,MaxZ`。
+- 测试方法：车体水平，慢转 360° 或多圈，尽量覆盖完整方向；停止后再发 `C` 关闭，并用 min/max 计算 offset/scale。

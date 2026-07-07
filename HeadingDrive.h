@@ -25,6 +25,7 @@ void HeadingDrive_Init(void);
 void HeadingDrive_Start(void);
 void HeadingDrive_Stop(void);
 void HeadingDrive_Update(void);
+void HeadingDrive_UpdateWithDt(float dt_sec);
 
 void HeadingDrive_SetBaseSpeed(int16_t speed);
 int16_t HeadingDrive_GetBaseSpeed(void);

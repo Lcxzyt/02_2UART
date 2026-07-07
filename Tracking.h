@@ -3,7 +3,10 @@
 
 #include <stdint.h>
 
-#define TRACK_NUM 4U
+#define TRACK_NUM 8U
+#define TRACK_CH5_MASK 0x10U
+#define TRACK_DISABLED_MASK 0U
+#define TRACK_ACTIVE_MASK ((uint8_t)(0xFFU & (uint8_t)(~TRACK_DISABLED_MASK)))
 
 typedef struct {
     uint16_t raw[TRACK_NUM];
@@ -22,3 +25,6 @@ uint8_t Tracking_ReadRaw(uint16_t raw[TRACK_NUM]);
 void Tracking_SetCalib(const uint16_t white[TRACK_NUM], const uint16_t black[TRACK_NUM]);
 
 #endif
+
+
+

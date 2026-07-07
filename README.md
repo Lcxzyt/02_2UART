@@ -70,23 +70,29 @@
 新增航向直行采用两层闭环：
 
 ```text
-MPU6050 gyro_z + QMC5883L mag_yaw
+MPU6050 accel/gyro + QMC5883P mag
     ↓
-Heading 互补航向：gyro 短时积分 + mag 慢速校正
+STM32 测试逻辑：Accel -> Roll/Pitch，Kalman 融合 Roll/Pitch
+    ↓
+QMC5883P + Roll/Pitch 倾角补偿 -> Yaw（不再使用 gyro_z 积分航向）
     ↓
 HeadingDrive 航向外环：误差 -> 差速
     ↓
 Motor 左右轮速度内环：目标速度 -> PWM
 ```
 
-- `h` 开关空白直行；开启后先重新初始化 IMU/磁力计，并采集约 60 个 20ms 周期的 gyro_z 零偏，校准完成后锁定当前航向再起步。
-- `y` 开关航向连续流，100ms 一次；蓝牙输出 `HYaw,HTgt,HErr,HDiff,TL,TR,AL,AR`，USB 输出 `HD,Sta,Cal,HYaw,HMag,HTgt,HErr,HDiff,TL,TR,AL,AR,PL,PR`。
-- `Y` 单次打印航向状态：融合航向、磁航向、目标航向、误差、差速、零偏和状态。
+- `h` 开关空白直行；开启后沿用 STM32 IMU 逻辑，锁定当前磁倾角补偿航向再起步；`gyro_z` 零偏校准命令保留为兼容入口但立即完成。
+- `y` 开关航向连续流，内部仍按 20ms 更新航向、100ms 打印一次；蓝牙输出 `HYaw,HMag,HTgt,HErr,HDiff,TL,TR,AL,AR,HGz`，USB 输出 `HD,Sta,Cal,HYaw,HMag,HTgt,HErr,HDiff,TL,TR,AL,AR,PL,PR`。
+- `Y` 单次打印航向状态：当前用于控制的航向、磁倾角补偿航向、目标航向、误差、差速和状态；当前 `HYaw` 与 `HMag` 来自同一个 STM32 磁倾角补偿 yaw。
+- `C` 开关磁力计校准采集流，100ms 输出 `MX,MY,MZ,MinX,MaxX,MinY,MaxY,MinZ,MaxZ`；车水平慢转一圈/几圈后，可计算新的磁力计 hard-iron offset。
+- `M` 自动磁力计校准：小车以 `TL=10,TR=-10` 原地低速自转约 10s，采集 X/Y min/max；覆盖范围合格则自动应用 hard-iron offset，scale 会按 STM32 逻辑忽略，失败则保留旧参数。
 - `u20` 设置航向直行基础速度，单位仍为 `counts/20ms`，同时也更新巡线基础速度。
 - `j0.8` / `k0.0` / `n0.25` 设置航向外环 `Kp/Ki/Kd`，第一版建议 `Ki=0`。
 - `g8` 设置航向差速限幅；低速 `u20~u30` 时建议先用 `g8~g15`。
+
+调试判断：`y` 蓝牙流第一列 `HYaw` 是真正用于控制的 STM32 磁倾角补偿航向；第二列 `HMag` 当前与 `HYaw` 等价。若航向乱跳，优先检查磁力计安装位置、附近电机线/铁件干扰和 hard-iron offset。
 - `z1` / `z-1` 设置航向外环输出方向。如果架空测试发现车偏右时差速修正方向反了，只改 `z`，不要改电机接线或速度环。
-- `c1` / `c-1` 设置 `gyro_z` 积分方向。如果原地旋转时融合航向短时变化方向和磁航向相反，只改 `c`。
+- `c1` / `c-1` 是旧 gyro_z 积分方向兼容命令，当前 STM32 yaw 逻辑不使用它。
 
 建议首测顺序：
 

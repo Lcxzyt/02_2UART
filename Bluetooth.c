@@ -1,9 +1,10 @@
-#include "Bluetooth.h"
+﻿#include "Bluetooth.h"
 #include "ti_msp_dl_config.h"
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 
+#define BLUETOOTH_UART_ENABLE 1U
 #define BLUETOOTH_RING_SIZE 256U
 #define BLUETOOTH_PRINTF_BUF_SIZE 256U
 
@@ -47,9 +48,11 @@ static void Bluetooth_DrainRx(void)
 
 void Bluetooth_PollRx(void)
 {
+#if BLUETOOTH_UART_ENABLE
     NVIC_DisableIRQ(BT_UART_INST_INT_IRQN);
     Bluetooth_DrainRx();
     NVIC_EnableIRQ(BT_UART_INST_INT_IRQN);
+#endif
 }
 
 uint32_t Bluetooth_GetRxCount(void)
@@ -64,15 +67,31 @@ uint32_t Bluetooth_GetIrqCount(void)
 
 void Bluetooth_Init(void)
 {
+#if BLUETOOTH_UART_ENABLE
     DL_UART_Main_setRXFIFOThreshold(BT_UART_INST, DL_UART_MAIN_RX_FIFO_LEVEL_ONE_ENTRY);
     DL_UART_enableInterrupt(BT_UART_INST, DL_UART_MAIN_INTERRUPT_RX);
     NVIC_ClearPendingIRQ(BT_UART_INST_INT_IRQN);
     NVIC_EnableIRQ(BT_UART_INST_INT_IRQN);
+#else
+    NVIC_DisableIRQ(BT_UART_INST_INT_IRQN);
+    DL_UART_Main_disableInterrupt(BT_UART_INST, DL_UART_MAIN_INTERRUPT_RX);
+    DL_UART_Main_disable(BT_UART_INST);
+    DL_GPIO_initDigitalInputFeatures(GPIO_BT_UART_IOMUX_TX,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
+        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initDigitalInputFeatures(GPIO_BT_UART_IOMUX_RX,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
+        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+#endif
 }
 
 void Bluetooth_SendByte(uint8_t byte)
 {
+#if BLUETOOTH_UART_ENABLE
     DL_UART_Main_transmitDataBlocking(BT_UART_INST, byte);
+#else
+    (void)byte;
+#endif
 }
 
 void Bluetooth_SendString(char *string)
@@ -97,6 +116,7 @@ void Bluetooth_Printf(char *format, ...)
 
 void BT_UART_INST_IRQHandler(void)
 {
+#if BLUETOOTH_UART_ENABLE
     bluetooth_irq_count++;
 
     switch (DL_UART_Main_getPendingInterrupt(BT_UART_INST)) {
@@ -107,5 +127,8 @@ void BT_UART_INST_IRQHandler(void)
         default:
             break;
     }
+#else
+    NVIC_ClearPendingIRQ(BT_UART_INST_INT_IRQN);
+#endif
 }
 

@@ -12,12 +12,24 @@
 #include <stdlib.h>
 
 #define Cmd_Printf(...) do { Serial_Printf(__VA_ARGS__); Bluetooth_Printf(__VA_ARGS__); } while (0)
-/* 20ms 周期下实测满速约 270 counts，留少量余量防止设定值长期不可达。 */
+#define Param_Printf(target, ...) do { \
+    if ((target) == STREAM_TARGET_BLUETOOTH) { Bluetooth_Printf(__VA_ARGS__); } \
+    else if ((target) == STREAM_TARGET_SERIAL) { Serial_Printf(__VA_ARGS__); } \
+    else { Cmd_Printf(__VA_ARGS__); } \
+} while (0)
+/* Measured full speed is about 270 counts per 20ms; leave a little headroom. */
 #define TARGET_MAX_COUNTS_20MS 300
+/* Automatic magnetometer calibration: rotate slowly for 10s and apply X/Y min/max. */
+#define MAG_AUTO_CAL_TICKS      500U
+#define MAG_AUTO_CAL_PRINT_TICKS 50U
+#define MAG_AUTO_CAL_SPEED      10
+#define MAG_AUTO_MIN_RADIUS     80.0f
+#define MAG_AUTO_RATIO_MIN      0.55f
+#define MAG_AUTO_RATIO_MAX      1.80f
 
 /* Mirror LineFollow.c threshold+hysteresis so x/X can print sensor bits even when f mode is off. */
-#define CMD_IR_ON_THRESHOLD  1000U
-#define CMD_IR_OFF_THRESHOLD 500U
+#define CMD_IR_ON_THRESHOLD  500U
+#define CMD_IR_OFF_THRESHOLD 250U
 
 volatile int16_t SpeedL;
 volatile int16_t SpeedR;
@@ -26,12 +38,17 @@ volatile int16_t SpeedFiltR;
 volatile uint8_t g_Cmd = 0x30;
 volatile uint8_t g_Run = 0;
 volatile uint8_t g_SampleReady = 0;
+volatile uint8_t g_SampleTicks = 0;
 volatile uint8_t g_Stream = 0;
 volatile uint8_t g_StreamTarget = STREAM_TARGET_NONE;
 volatile uint8_t g_IrStream = 0;
 volatile uint8_t g_IrStreamTarget = STREAM_TARGET_NONE;
 volatile uint8_t g_HeadingStream = 0;
 volatile uint8_t g_HeadingStreamTarget = STREAM_TARGET_NONE;
+volatile uint8_t g_MagCalStream = 0;
+volatile uint8_t g_MagCalStreamTarget = STREAM_TARGET_NONE;
+volatile uint8_t g_MagAutoCal = 0;
+volatile uint8_t g_MagAutoCalProgress = 0;
 volatile uint8_t g_DisplayDirty = 0;
 volatile uint8_t g_ImuDisplayDirty = 0;
 volatile uint8_t g_DisplayMode = 0;
@@ -39,10 +56,25 @@ volatile uint8_t g_DisplayMode = 0;
 static int16_t cmd_target_l = 0;
 static int16_t cmd_target_r = 0;
 static uint8_t cmd_ir_bits = 0U;
+static int16_t mag_cal_min_x;
+static int16_t mag_cal_max_x;
+static int16_t mag_cal_min_y;
+static int16_t mag_cal_max_y;
+static int16_t mag_cal_min_z;
+static int16_t mag_cal_max_z;
+static uint8_t mag_cal_has_sample;
+static uint16_t mag_auto_cal_ticks;
+static uint8_t mag_auto_cal_target = STREAM_TARGET_NONE;
+static uint8_t mag_auto_cal_fail_count;
+
+static int32_t Float_ToInt(float value)
+{
+    return (int32_t)(value >= 0.0f ? (value + 0.5f) : (value - 0.5f));
+}
 
 static uint8_t Cmd_UpdateIrBitsFromTrack(const Tracking_Data *track)
 {
-    static const uint8_t bit_mask[TRACK_NUM] = {0x08U, 0x04U, 0x02U, 0x01U};
+    static const uint8_t bit_mask[TRACK_NUM] = {0x01U, 0x02U, 0x04U, 0x08U, 0x10U, 0x20U, 0x40U, 0x80U};
     uint8_t i;
 
     if (track == 0) return cmd_ir_bits;
@@ -84,123 +116,99 @@ static void Apply_Targets(void)
     Motor_SetTarget_R(cmd_target_r);
 }
 
-static void Print_Gain(char *name, float v)
+static void Print_Gain(uint8_t target, char *name, float v)
 {
     int32_t milli = (int32_t)(v * 1000.0f + (v >= 0.0f ? 0.5f : -0.5f));
     int32_t i = milli / 1000;
     int32_t f = milli % 1000;
     if (f < 0) f = -f;
-    Cmd_Printf("%s=%d.%03d ", name, (int)i, (int)f);
+    Param_Printf(target, "%s=%d.%03d ", name, (int)i, (int)f);
 }
 
-static void Print_Params(void)
+static void Print_Params(uint8_t target)
 {
     float kp, ki, kd;
-    float lkp, lki, lkd;
     float hkp, hki, hkd;
+    float lkp, lki, lkd;
     const Heading_Data *heading = Heading_GetData();
+
     Motor_PID_GetTunings(&kp, &ki, &kd);
-    LineFollow_GetTunings(&lkp, &lki, &lkd);
     HeadingDrive_GetTunings(&hkp, &hki, &hkd);
+    LineFollow_GetTunings(&lkp, &lki, &lkd);
 
-    Print_Gain("Kp", kp);
-    Print_Gain("Ki", ki);
-    Print_Gain("Kd", kd);
-    Print_Gain("LKp", lkp);
-    Print_Gain("LKi", lki);
-    Print_Gain("LKd", lkd);
-    Print_Gain("HKp", hkp);
-    Print_Gain("HKi", hki);
-    Print_Gain("HKd", hkd);
-    Cmd_Printf("\r\n");
+    Param_Printf(target,
+        "STAT Run=%u V=%u IR=%u HS=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu\r\n",
+        (unsigned int)g_Run,
+        (unsigned int)g_Stream,
+        (unsigned int)g_IrStream,
+        (unsigned int)g_HeadingStream,
+        (unsigned int)g_MagCalStream,
+        (unsigned int)g_MagAutoCal,
+        (int)Motor_GetTarget_L(),
+        (int)Motor_GetTarget_R(),
+        (int)Motor_GetActual_L(),
+        (int)Motor_GetActual_R(),
+        (int)Motor_GetPwm_L(),
+        (int)Motor_GetPwm_R(),
+        (unsigned long)Bluetooth_GetRxCount(),
+        (unsigned long)Bluetooth_GetIrqCount());
 
-    Cmd_Printf("ReqL=%d ReqR=%d TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d Run=%d Stream=%d IR=%d HS=%d Unit=target_counts/20ms\r\n",
-               (int)cmd_target_l,
-               (int)cmd_target_r,
-               (int)Motor_GetTarget_L(),
-               (int)Motor_GetTarget_R(),
-               (int)Motor_GetActual_L(),
-               (int)Motor_GetActual_R(),
-               (int)Motor_GetPwm_L(),
-               (int)Motor_GetPwm_R(),
-               (int)g_Run,
-               (int)g_Stream,
-               (int)g_IrStream,
-               (int)g_HeadingStream);
-    Cmd_Printf("OL=%d OLPwm=%d OLLim=%d FiltL=%d FiltR=%d EncPin=0x%02X EncSumL=%ld EncSumR=%ld BTRX=%lu BTIRQ=%lu\r\n",
-               (int)Motor_OpenLoop_IsEnabled(),
-               (int)Motor_OpenLoop_GetPwm(),
-               (int)Motor_OpenLoop_GetLimit(),
-               (int)SpeedFiltL,
-               (int)SpeedFiltR,
-               (unsigned int)Encoder_GetPinState(),
-               (long)Encoder_GetTotal_L(),
-               (long)Encoder_GetTotal_R(),
-               (unsigned long)Bluetooth_GetRxCount(),
-               (unsigned long)Bluetooth_GetIrqCount());
-    Cmd_Printf("LF=%d LFSta=%d LFBase=%d LFErr=%d LInt=%ld LDiff=%d LFBits=0x%X LFPat=0x%X\r\n",
-               (int)LineFollow_IsEnabled(),
-               (int)LineFollow_GetState(),
-               (int)LineFollow_GetBaseSpeed(),
-               (int)LineFollow_GetLastError(),
-               (long)LineFollow_GetIntegral(),
-               (int)LineFollow_GetLastDiff(),
-               (unsigned int)LineFollow_GetBits(),
-               (unsigned int)LineFollow_GetPattern());
-    Cmd_Printf("HD=%d HDSta=%d HBase=%d HLim=%d HYaw=%d HMag=%d HTgt=%d HErr=%d HDiff=%d HInt=%ld HCal=%u\r\n",
-               (int)HeadingDrive_IsEnabled(),
-               (int)HeadingDrive_GetState(),
-               (int)HeadingDrive_GetBaseSpeed(),
-               (int)HeadingDrive_GetDiffLimit(),
-               (int)HeadingDrive_GetCurrentYaw(),
-               (int)Heading_GetMagYawDeg(),
-               (int)HeadingDrive_GetTargetYaw(),
-               (int)HeadingDrive_GetErrorDeg(),
-               (int)HeadingDrive_GetLastDiff(),
-               (long)HeadingDrive_GetIntegral(),
-               (unsigned int)Heading_GetCalProgress());
-    Cmd_Printf("HMpu=%u HMagOk=%u HGz=%d HBias=%d HZSign=%d HDSign=%d HYawF=%d HSta=%u\r\n",
-               (unsigned int)heading->mpu_ok,
-               (unsigned int)heading->mag_ok,
-               (int)heading->gyro_z_raw,
-               (int)heading->gyro_z_bias,
-               (int)heading->gyro_z_sign,
-               (int)HeadingDrive_GetOutputSign(),
-               (int)Heading_GetYawDeg(),
-               (unsigned int)Heading_GetState());
+    Param_Printf(target, "GAIN ");
+    Print_Gain(target, "Kp", kp);
+    Print_Gain(target, "Ki", ki);
+    Print_Gain(target, "Kd", kd);
+    Print_Gain(target, "HKp", hkp);
+    Print_Gain(target, "HKi", hki);
+    Print_Gain(target, "HKd", hkd);
+    Print_Gain(target, "LKp", lkp);
+    Print_Gain(target, "LKi", lki);
+    Print_Gain(target, "LKd", lkd);
+    Param_Printf(target,
+        "LF=%u/%u B=%02X E=%d HD=%u/%u Y=%d T=%d HE=%d IMU=%u/%u\r\n",
+        (unsigned int)LineFollow_IsEnabled(),
+        (unsigned int)LineFollow_GetState(),
+        (unsigned int)LineFollow_GetBits(),
+        (int)LineFollow_GetLastError(),
+        (unsigned int)HeadingDrive_IsEnabled(),
+        (unsigned int)HeadingDrive_GetState(),
+        (int)Heading_GetYawDeg(),
+        (int)HeadingDrive_GetTargetYaw(),
+        (int)HeadingDrive_GetErrorDeg(),
+        (unsigned int)heading->mpu_ok,
+        (unsigned int)heading->mag_ok);
+
     if (g_DisplayMode == 1U) {
         g_ImuDisplayDirty = 1U;
     } else {
         g_DisplayDirty = 1U;
     }
 }
-
 static uint8_t Is_LineCmd(uint8_t c)
 {
     return (c == 'p' || c == 'P' || c == 'i' || c == 'I' ||
             c == 'd' || c == 'D' || c == 't' || c == 'T' ||
             c == 'b' || c == 'B' || c == 'l' || c == 'L' ||
             c == 'r' || c == 'R' || c == 'u' || c == 'U' ||
-            c == 'q' || c == 'Q' ||
-            c == 'a' || c == 'A' || c == 'e' || c == 'E' ||
             c == 'j' || c == 'J' || c == 'k' || c == 'K' ||
             c == 'n' || c == 'N' || c == 'g' || c == 'G' ||
-            c == 'z' || c == 'Z' || c == 'c' || c == 'C' ||
+            c == 'z' || c == 'Z' || c == 'c' ||
+            c == 'q' || c == 'Q' || c == 'w' || c == 'W' ||
+            c == 'e' || c == 'E' ||
             c == 'o' || c == 'O');
 }
 
-static void Parse_TuneLine(char *line)
+static void Parse_TuneLine(char *line, uint8_t source)
 {
     float kp, ki, kd;
-    float lkp, lki, lkd;
     float hkp, hki, hkd;
+    float lkp, lki, lkd;
     int16_t value;
     char c = line[0];
     if (c >= 'A' && c <= 'Z') c += 32;
 
     Motor_PID_GetTunings(&kp, &ki, &kd);
-    LineFollow_GetTunings(&lkp, &lki, &lkd);
     HeadingDrive_GetTunings(&hkp, &hki, &hkd);
+    LineFollow_GetTunings(&lkp, &lki, &lkd);
     value = Clamp_Target((int16_t)atoi(line + 1));
 
     switch (c) {
@@ -220,7 +228,7 @@ static void Parse_TuneLine(char *line)
             lkp = (float)atof(line + 1);
             LineFollow_SetTunings(lkp, lki, lkd);
             break;
-        case 'a':
+        case 'w':
             lki = (float)atof(line + 1);
             LineFollow_SetTunings(lkp, lki, lkd);
             break;
@@ -291,137 +299,288 @@ static void Parse_TuneLine(char *line)
             break;
     }
 
-    Print_Params();
+    Print_Params(source);
 }
 
+
+static void CmdDispatch_ResetMagCal(void)
+{
+    mag_cal_min_x = 0;
+    mag_cal_max_x = 0;
+    mag_cal_min_y = 0;
+    mag_cal_max_y = 0;
+    mag_cal_min_z = 0;
+    mag_cal_max_z = 0;
+    mag_cal_has_sample = 0U;
+}
+
+static void CmdDispatch_UpdateMagCalBounds(int16_t mx, int16_t my, int16_t mz)
+{
+    if (!mag_cal_has_sample) {
+        mag_cal_min_x = mx;
+        mag_cal_max_x = mx;
+        mag_cal_min_y = my;
+        mag_cal_max_y = my;
+        mag_cal_min_z = mz;
+        mag_cal_max_z = mz;
+        mag_cal_has_sample = 1U;
+        return;
+    }
+
+    if (mx < mag_cal_min_x) mag_cal_min_x = mx;
+    if (mx > mag_cal_max_x) mag_cal_max_x = mx;
+    if (my < mag_cal_min_y) mag_cal_min_y = my;
+    if (my > mag_cal_max_y) mag_cal_max_y = my;
+    if (mz < mag_cal_min_z) mag_cal_min_z = mz;
+    if (mz > mag_cal_max_z) mag_cal_max_z = mz;
+}
+
+static void CmdDispatch_StopMagAutoCalMotor(void)
+{
+    cmd_target_l = 0;
+    cmd_target_r = 0;
+    g_Run = 0U;
+    Motor_SetTarget_L(0);
+    Motor_SetTarget_R(0);
+    Motor_Control_Stop();
+    Timer_ResetSpeedFilter();
+}
+
+static void CmdDispatch_FinishMagAutoCal(void)
+{
+    float radius_x;
+    float radius_y;
+    float ratio;
+    float offset_x;
+    float offset_y;
+    float offset_z;
+
+    CmdDispatch_StopMagAutoCalMotor();
+    g_MagAutoCal = 0U;
+    g_MagAutoCalProgress = 100U;
+
+    radius_x = (float)(mag_cal_max_x - mag_cal_min_x) * 0.5f;
+    radius_y = (float)(mag_cal_max_y - mag_cal_min_y) * 0.5f;
+    ratio = (radius_y > 0.0f) ? (radius_x / radius_y) : 0.0f;
+
+    if ((!mag_cal_has_sample) ||
+        (mag_auto_cal_fail_count > 20U) ||
+        (radius_x < MAG_AUTO_MIN_RADIUS) ||
+        (radius_y < MAG_AUTO_MIN_RADIUS) ||
+        (ratio < MAG_AUTO_RATIO_MIN) ||
+        (ratio > MAG_AUTO_RATIO_MAX)) {
+        Param_Printf(mag_auto_cal_target, "MCal FAIL MinX=%d MaxX=%d MinY=%d MaxY=%d RX=%ld RY=%ld Fail=%u keep old\r\n",
+                   (int)mag_cal_min_x,
+                   (int)mag_cal_max_x,
+                   (int)mag_cal_min_y,
+                   (int)mag_cal_max_y,
+                   (long)Float_ToInt(radius_x),
+                   (long)Float_ToInt(radius_y),
+                   (unsigned int)mag_auto_cal_fail_count);
+        Print_Params(mag_auto_cal_target);
+        return;
+    }
+
+    offset_x = (float)(mag_cal_max_x + mag_cal_min_x) * 0.5f;
+    offset_y = (float)(mag_cal_max_y + mag_cal_min_y) * 0.5f;
+    offset_z = (float)(mag_cal_max_z + mag_cal_min_z) * 0.5f;
+
+    IMUTest_SetMagCalibration(offset_x, offset_y, offset_z, 1.0f, 1.0f, 1.0f);
+    Param_Printf(mag_auto_cal_target, "MCal OK STM32-hard-iron-only OffX10=%ld OffY10=%ld OffZ10=%ld MinX=%d MaxX=%d MinY=%d MaxY=%d\r\n",
+                 (long)Float_ToInt(offset_x * 10.0f),
+                 (long)Float_ToInt(offset_y * 10.0f),
+                 (long)Float_ToInt(offset_z * 10.0f),
+                 (int)mag_cal_min_x,
+                 (int)mag_cal_max_x,
+                 (int)mag_cal_min_y,
+                 (int)mag_cal_max_y);
+    Print_Params(mag_auto_cal_target);
+}
+
+static void CmdDispatch_StartMagAutoCal(uint8_t source)
+{
+    if (LineFollow_IsEnabled()) {
+        LineFollow_Stop();
+    }
+    if (HeadingDrive_IsEnabled()) {
+        HeadingDrive_Stop();
+    }
+    Motor_OpenLoop_Stop();
+
+    CmdDispatch_ResetMagCal();
+    mag_auto_cal_ticks = 0U;
+    mag_auto_cal_fail_count = 0U;
+    mag_auto_cal_target = source;
+    g_MagAutoCal = 1U;
+    g_MagAutoCalProgress = 0U;
+    g_Stream = 0U;
+    g_StreamTarget = STREAM_TARGET_NONE;
+    g_IrStream = 0U;
+    g_IrStreamTarget = STREAM_TARGET_NONE;
+    g_HeadingStream = 0U;
+    g_HeadingStreamTarget = STREAM_TARGET_NONE;
+    g_MagCalStream = 0U;
+    g_MagCalStreamTarget = STREAM_TARGET_NONE;
+
+    g_Run = 1U;
+    cmd_target_l = MAG_AUTO_CAL_SPEED;
+    cmd_target_r = (int16_t)-MAG_AUTO_CAL_SPEED;
+    Motor_SetTarget_L(cmd_target_l);
+    Motor_SetTarget_R(cmd_target_r);
+    Param_Printf(source, "MCal START %us TL=%d TR=%d rotate in place\r\n",
+               (unsigned int)(MAG_AUTO_CAL_TICKS / 50U),
+               (int)cmd_target_l,
+               (int)cmd_target_r);
+}
+
+static void CmdDispatch_CancelMagAutoCal(uint8_t source)
+{
+    CmdDispatch_StopMagAutoCalMotor();
+    g_MagAutoCal = 0U;
+    g_MagAutoCalProgress = 0U;
+    mag_auto_cal_target = STREAM_TARGET_NONE;
+    Param_Printf(source, "MCal CANCEL keep old\r\n");
+}
+
+void CmdDispatch_UpdateMagAutoCal(void)
+{
+    int16_t mx = 0;
+    int16_t my = 0;
+    int16_t mz = 0;
+
+    if (!g_MagAutoCal) {
+        return;
+    }
+
+    if (IMUTest_ReadMagRaw(&mx, &my, &mz)) {
+        CmdDispatch_UpdateMagCalBounds(mx, my, mz);
+    } else if (mag_auto_cal_fail_count < 255U) {
+        mag_auto_cal_fail_count++;
+    }
+
+    if (mag_auto_cal_ticks < MAG_AUTO_CAL_TICKS) {
+        mag_auto_cal_ticks++;
+    }
+    g_MagAutoCalProgress =
+        (uint8_t)((uint32_t)mag_auto_cal_ticks * 100U / MAG_AUTO_CAL_TICKS);
+
+    if ((mag_auto_cal_target != STREAM_TARGET_NONE) &&
+        ((mag_auto_cal_ticks % MAG_AUTO_CAL_PRINT_TICKS) == 0U)) {
+        Param_Printf(mag_auto_cal_target, "MCal %u%% MX=%d MY=%d MZ=%d MinX=%d MaxX=%d MinY=%d MaxY=%d\r\n",
+                   (unsigned int)g_MagAutoCalProgress,
+                   (int)mx,
+                   (int)my,
+                   (int)mz,
+                   (int)mag_cal_min_x,
+                   (int)mag_cal_max_x,
+                   (int)mag_cal_min_y,
+                   (int)mag_cal_max_y);
+    }
+
+    if (mag_auto_cal_ticks >= MAG_AUTO_CAL_TICKS) {
+        CmdDispatch_FinishMagAutoCal();
+    }
+}
+
+void CmdDispatch_PrintMagCal(uint8_t target)
+{
+    int16_t mx, my, mz;
+
+    if (!IMUTest_ReadMagRaw(&mx, &my, &mz)) {
+        mx = 0;
+        my = 0;
+        mz = 0;
+    }
+    CmdDispatch_UpdateMagCalBounds(mx, my, mz);
+
+    /* MAG,MX,MY,MZ,MinX,MaxX,MinY,MaxY,MinZ,MaxZ */
+    Param_Printf(target, "MAG,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                 (int)mx, (int)my, (int)mz,
+                 (int)mag_cal_min_x, (int)mag_cal_max_x,
+                 (int)mag_cal_min_y, (int)mag_cal_max_y,
+                 (int)mag_cal_min_z, (int)mag_cal_max_z);
+}
 void CmdDispatch_PrintTracking(uint8_t target)
 {
     const Tracking_Data *track;
     uint8_t bits;
     uint8_t pattern;
 
-    track = Tracking_GetData();
-    if ((!LineFollow_IsEnabled()) || !track->valid) {
-        if (!Tracking_Update()) {
-            if (target == STREAM_TARGET_BLUETOOTH) {
-                Bluetooth_Printf("IR ADC read timeout\r\n");
-            } else {
-                Serial_Printf("IR ADC read timeout\r\n");
-            }
-            return;
-        }
-        track = Tracking_GetData();
+    /* X/x are explicit sensor debug commands, so take a fresh ADC snapshot each time. */
+    if (!Tracking_Update()) {
+        Param_Printf(target, "IR8 ADC read failed\r\n");
+        return;
     }
-
+    track = Tracking_GetData();
     if (!track->valid) {
-        if (target == STREAM_TARGET_BLUETOOTH) {
-            Bluetooth_Printf("IR ADC read timeout\r\n");
-        } else {
-            Serial_Printf("IR ADC read timeout\r\n");
-        }
+        Param_Printf(target, "IR8 ADC read failed\r\n");
         return;
     }
 
     bits = Cmd_UpdateIrBitsFromTrack(track);
     pattern = LineFollow_IsEnabled() ? LineFollow_GetPattern() : bits;
 
-    if (target == STREAM_TARGET_BLUETOOTH) {
-        /*
-         * Bluetooth 9600 compact CSV for line-follow debug:
-         * L2,L1,R1,R2,Bits,Pat,Sta,Diff,TL,TR,AL,AR
-         * L2/L1/R1/R2 are the threshold+hysteresis 0/1 bits used by the FSM.
-         */
-        Bluetooth_Printf("%u,%u,%u,%u,%u,%u,%u,%d,%d,%d,%d,%d\r\n",
-                         (unsigned int)((bits & 0x08U) ? 1U : 0U),
-                         (unsigned int)((bits & 0x04U) ? 1U : 0U),
-                         (unsigned int)((bits & 0x02U) ? 1U : 0U),
-                         (unsigned int)((bits & 0x01U) ? 1U : 0U),
-                         (unsigned int)bits,
-                         (unsigned int)pattern,
-                         (unsigned int)LineFollow_GetState(),
-                         (int)LineFollow_GetLastDiff(),
-                         (int)Motor_GetTarget_L(),
-                         (int)Motor_GetTarget_R(),
-                         (int)Motor_GetActual_L(),
-                         (int)Motor_GetActual_R());
-    } else {
-        Serial_Printf("IR raw=%u,%u,%u,%u filt=%u,%u,%u,%u norm=%u,%u,%u,%u Str=%u Err=%d Bits=0x%X Pat=0x%X Valid=%u Pins=L2 PA16,L1 PA17,R1 PB17,R2 PB18\r\n",
-                      (unsigned int)track->raw[0],
-                      (unsigned int)track->raw[1],
-                      (unsigned int)track->raw[2],
-                      (unsigned int)track->raw[3],
-                      (unsigned int)track->filt[0],
-                      (unsigned int)track->filt[1],
-                      (unsigned int)track->filt[2],
-                      (unsigned int)track->filt[3],
-                      (unsigned int)track->norm[0],
-                      (unsigned int)track->norm[1],
-                      (unsigned int)track->norm[2],
-                      (unsigned int)track->norm[3],
-                      (unsigned int)track->strength,
-                      (int)track->error,
-                      (unsigned int)bits,
-                      (unsigned int)pattern,
-                      (unsigned int)track->valid);
-    }
+    /* IR8,raw1..raw8,norm1..norm8,strength,error,bits,pattern */
+    Param_Printf(target,
+        "IR8,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%02X,%02X\r\n",
+        (unsigned int)track->raw[0],
+        (unsigned int)track->raw[1],
+        (unsigned int)track->raw[2],
+        (unsigned int)track->raw[3],
+        (unsigned int)track->raw[4],
+        (unsigned int)track->raw[5],
+        (unsigned int)track->raw[6],
+        (unsigned int)track->raw[7],
+        (unsigned int)track->norm[0],
+        (unsigned int)track->norm[1],
+        (unsigned int)track->norm[2],
+        (unsigned int)track->norm[3],
+        (unsigned int)track->norm[4],
+        (unsigned int)track->norm[5],
+        (unsigned int)track->norm[6],
+        (unsigned int)track->norm[7],
+        (unsigned int)track->strength,
+        (int)track->error,
+        (unsigned int)bits,
+        (unsigned int)pattern);
 }
-
 void CmdDispatch_PrintHeading(uint8_t target)
 {
-    if (!HeadingDrive_IsEnabled()) {
-        (void)Heading_Update();
-    }
-
-    if (target == STREAM_TARGET_BLUETOOTH) {
-        /*
-         * Bluetooth 9600 compact CSV:
-         * HYaw,HTgt,HErr,HDiff,TL,TR,AL,AR
-         */
-        Bluetooth_Printf("%d,%d,%d,%d,%d,%d,%d,%d\r\n",
-                         (int)Heading_GetYawDeg(),
-                         (int)HeadingDrive_GetTargetYaw(),
-                         (int)HeadingDrive_GetErrorDeg(),
-                         (int)HeadingDrive_GetLastDiff(),
-                         (int)Motor_GetTarget_L(),
-                         (int)Motor_GetTarget_R(),
-                         (int)Motor_GetActual_L(),
-                         (int)Motor_GetActual_R());
-    } else {
-        /*
-         * USB CSV:
-         * HD,Sta,Cal,HYaw,HMag,HTgt,HErr,HDiff,TL,TR,AL,AR,PL,PR
-         */
-        Serial_Printf("%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
-                      (unsigned int)HeadingDrive_IsEnabled(),
-                      (unsigned int)HeadingDrive_GetState(),
-                      (unsigned int)Heading_GetCalProgress(),
-                      (int)Heading_GetYawDeg(),
-                      (int)Heading_GetMagYawDeg(),
-                      (int)HeadingDrive_GetTargetYaw(),
-                      (int)HeadingDrive_GetErrorDeg(),
-                      (int)HeadingDrive_GetLastDiff(),
-                      (int)Motor_GetTarget_L(),
-                      (int)Motor_GetTarget_R(),
-                      (int)Motor_GetActual_L(),
-                      (int)Motor_GetActual_R(),
-                      (int)Motor_GetPwm_L(),
-                      (int)Motor_GetPwm_R());
-    }
+    /* HD,enabled,state,cal,yaw,magYaw,target,error,diff,TL,TR,AL,AR,PL,PR,gz */
+    Param_Printf(target, "HD,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                 (unsigned int)HeadingDrive_IsEnabled(),
+                 (unsigned int)HeadingDrive_GetState(),
+                 (unsigned int)Heading_GetCalProgress(),
+                 (int)Heading_GetYawDeg(),
+                 (int)Heading_GetMagYawDeg(),
+                 (int)HeadingDrive_GetTargetYaw(),
+                 (int)HeadingDrive_GetErrorDeg(),
+                 (int)HeadingDrive_GetLastDiff(),
+                 (int)Motor_GetTarget_L(),
+                 (int)Motor_GetTarget_R(),
+                 (int)Motor_GetActual_L(),
+                 (int)Motor_GetActual_R(),
+                 (int)Motor_GetPwm_L(),
+                 (int)Motor_GetPwm_R(),
+                 (int)Heading_GetGyroZRaw());
 }
-
 #define LINE_BUF_SIZE 64U
 
 static char tune_line[LINE_BUF_SIZE];
 static uint8_t tune_len = 0;
 static uint8_t tune_active = 0;
+static uint8_t tune_source = STREAM_TARGET_NONE;
 
 static void Dispatch_Immediate(uint8_t ch, uint8_t source)
 {
     if (ch == '0' || ch == 's' || ch == 'S') {
+        if (g_MagAutoCal) {
+            CmdDispatch_CancelMagAutoCal(source);
+        }
         g_Cmd = 0x30;
         g_Run = 0U;
         Apply_Targets();
-        Print_Params();
+        Print_Params(source);
     } else if (ch == '1') {
         g_Cmd = 0x31;
         if (LineFollow_IsEnabled()) {
@@ -430,7 +589,7 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
         Motor_OpenLoop_Stop();
         g_Run = 1U;
         Apply_Targets();
-        Print_Params();
+        Print_Params(source);
     } else if (ch == 'v' || ch == 'V') {
         if (LineFollow_IsEnabled() || HeadingDrive_IsEnabled()) {
             g_Stream = 0U;
@@ -445,10 +604,17 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
                 g_HeadingStreamTarget = STREAM_TARGET_NONE;
             }
         }
-        Print_Params();
+        Print_Params(source);
     } else if (ch == '?') {
-        Print_Params();
-    } else if (ch == 'm' || ch == 'M') {
+        Print_Params(source);
+    } else if (ch == 'M') {
+        if (g_MagAutoCal) {
+            CmdDispatch_CancelMagAutoCal(source);
+        } else {
+            CmdDispatch_StartMagAutoCal(source);
+        }
+        Print_Params(source);
+    } else if (ch == 'm') {
         g_DisplayMode ^= 1U;
         if (g_DisplayMode == 1U) {
             g_ImuDisplayDirty = 1U;
@@ -464,7 +630,20 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             g_IrStream = 0U;
             g_IrStreamTarget = STREAM_TARGET_NONE;
         }
-        Print_Params();
+        Print_Params(source);
+    } else if (ch == 'C') {
+        g_MagCalStream ^= 1U;
+        g_MagCalStreamTarget = g_MagCalStream ? source : STREAM_TARGET_NONE;
+        if (g_MagCalStream) {
+            CmdDispatch_ResetMagCal();
+            g_Stream = 0U;
+            g_StreamTarget = STREAM_TARGET_NONE;
+            g_IrStream = 0U;
+            g_IrStreamTarget = STREAM_TARGET_NONE;
+            g_HeadingStream = 0U;
+            g_HeadingStreamTarget = STREAM_TARGET_NONE;
+        }
+        Print_Params(source);
     } else if (ch == 'x') {
         g_IrStream ^= 1U;
         g_IrStreamTarget = g_IrStream ? source : STREAM_TARGET_NONE;
@@ -474,12 +653,12 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             g_HeadingStream = 0U;
             g_HeadingStreamTarget = STREAM_TARGET_NONE;
         }
-        Print_Params();
+        Print_Params(source);
     } else if (ch == 'X') {
         CmdDispatch_PrintTracking(source);
     } else if (ch == 'Y') {
         (void)Heading_Update();
-        Print_Params();
+        Print_Params(source);
     } else if (ch == 'f' || ch == 'F') {
         if (LineFollow_IsEnabled()) {
             LineFollow_Stop();
@@ -496,7 +675,7 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             g_HeadingStream = 0U;
             g_HeadingStreamTarget = STREAM_TARGET_NONE;
         }
-        Print_Params();
+        Print_Params(source);
     } else if (ch == 'h' || ch == 'H') {
         if (HeadingDrive_IsEnabled()) {
             HeadingDrive_Stop();
@@ -513,7 +692,7 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             g_IrStream = 0U;
             g_IrStreamTarget = STREAM_TARGET_NONE;
         }
-        Print_Params();
+        Print_Params(source);
     }
 }
 
@@ -522,14 +701,16 @@ static void Dispatch_Byte(uint8_t ch, uint8_t source)
     if (tune_active) {
         if (ch == '\n' || ch == '\r') {
             tune_line[tune_len] = '\0';
-            if (tune_len > 0U) Parse_TuneLine(tune_line);
+            if (tune_len > 0U) Parse_TuneLine(tune_line, tune_source);
             tune_len = 0U;
             tune_active = 0U;
+            tune_source = STREAM_TARGET_NONE;
         } else if (tune_len < (LINE_BUF_SIZE - 1U)) {
             tune_line[tune_len++] = (char)ch;
         } else {
             tune_len = 0U;
             tune_active = 0U;
+            tune_source = STREAM_TARGET_NONE;
         }
         return;
     }
@@ -538,6 +719,7 @@ static void Dispatch_Byte(uint8_t ch, uint8_t source)
         tune_len = 0U;
         tune_line[tune_len++] = (char)ch;
         tune_active = 1U;
+        tune_source = source;
         return;
     }
 
@@ -563,3 +745,13 @@ void CmdDispatch_Process(void)
         Dispatch_Byte(Bluetooth_RingBuf_Get(), STREAM_TARGET_BLUETOOTH);
     }
 }
+
+
+
+
+
+
+
+
+
+

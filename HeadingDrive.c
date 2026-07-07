@@ -77,7 +77,7 @@ void HeadingDrive_Stop(void)
     Motor_Control_Stop();
 }
 
-void HeadingDrive_Update(void)
+void HeadingDrive_UpdateWithDt(float dt_sec)
 {
     int16_t error;
     int16_t delta;
@@ -88,7 +88,7 @@ void HeadingDrive_Update(void)
 
     if (!hd_data.enabled) return;
 
-    if (!Heading_Update()) {
+    if (!Heading_UpdateWithDt(dt_sec)) {
         hd_data.state = (Heading_GetState() == HEADING_STATE_CALIBRATING) ?
             HD_STATE_CALIBRATING : HD_STATE_SENSOR_FAIL;
         HeadingDrive_SetTargets(0, 0);
@@ -128,6 +128,11 @@ void HeadingDrive_Update(void)
     hd_data.error_deg = error;
     hd_data.last_diff = diff;
     hd_last_error = error;
+}
+
+void HeadingDrive_Update(void)
+{
+    HeadingDrive_UpdateWithDt(0.020f);
 }
 
 void HeadingDrive_SetBaseSpeed(int16_t speed)

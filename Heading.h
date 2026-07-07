@@ -25,6 +25,7 @@ typedef struct {
 bool Heading_Init(void);
 void Heading_StartCalibration(void);
 bool Heading_Update(void);
+bool Heading_UpdateWithDt(float dt_sec);
 
 uint8_t Heading_IsReady(void);
 uint8_t Heading_GetState(void);

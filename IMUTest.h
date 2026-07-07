@@ -26,6 +26,11 @@ typedef struct {
 
 bool IMUTest_Init(void);
 bool IMUTest_Read(IMUTest_Data *data);
+bool IMUTest_ReadMagRaw(int16_t *magX, int16_t *magY, int16_t *magZ);
+void IMUTest_SetMagCalibration(float offsetX, float offsetY, float offsetZ,
+                               float scaleX, float scaleY, float scaleZ);
+void IMUTest_GetMagCalibration(float *offsetX, float *offsetY, float *offsetZ,
+                               float *scaleX, float *scaleY, float *scaleZ);
 bool IMUTest_Print(void);
 void IMUTest_GetLast(IMUTest_Data *data);
 bool IMUTest_IsReady(void);

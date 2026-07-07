@@ -1,6 +1,7 @@
 #include "ti_msp_dl_config.h"
 #include "Serial.h"
 #include "Bluetooth.h"
+#include "BoardIO.h"
 #include "OLED.h"
 #include "Motor.h"
 #include "Encoder.h"
@@ -17,17 +18,31 @@
 
 #define Stream_Printf(...) do { Serial_Printf(__VA_ARGS__); Bluetooth_Printf(__VA_ARGS__); } while (0)
 
-/* OLED 只作为观察窗口，不要把控制周期绑定到这个刷新频率。 */
-#define OLED_UPDATE_TICKS 1U
-/* 红外蓝牙日志只用于观察，100ms 一次足够看状态，同时避免拖慢主循环。 */
-#define IR_STREAM_PRINT_TICKS 5U
-/* 航向状态流同样降到 100ms，避免 9600 蓝牙输出拖慢控制。 */
+/* Update OLED actual-data pages every 100ms; fast enough for eyes, light enough for I2C/OLED. */
+#define OLED_UPDATE_TICKS 5U
+/* Speed stream prints every 100ms to avoid flooding 9600 baud Bluetooth. */
+#define SPEED_STREAM_PRINT_TICKS 5U
+/* IR ADC stream prints every 200ms to avoid slowing 9600 baud Bluetooth. */
+#define IR_STREAM_PRINT_TICKS 10U
+/* Heading stream also prints every 100ms to avoid slowing 9600 baud Bluetooth. */
 #define HEADING_STREAM_PRINT_TICKS 5U
+/* Debug streams print every 100ms to avoid slowing the main loop. */
+#define MAG_CAL_STREAM_PRINT_TICKS 5U
 #define DISPLAY_LAYOUT_WAIT 0U
 #define DISPLAY_LAYOUT_SPEED 1U
 #define DISPLAY_LAYOUT_IMU 2U
 
+#define APP_OLED_PAGE_SPEED   0U
+#define APP_OLED_PAGE_ANGLE   1U
+#define APP_OLED_PAGE_BUZZER  2U
+#define APP_OLED_PAGE_LED     3U
+#define APP_OLED_PAGE_ADC     4U
+#define APP_OLED_PAGE_IMU_CAL 5U
+#define APP_OLED_PAGE_COUNT   6U
+
 static uint8_t display_layout = DISPLAY_LAYOUT_WAIT;
+static uint8_t app_oled_page = APP_OLED_PAGE_SPEED;
+static uint8_t app_oled_ok;
 
 typedef struct {
     int16_t target_l;
@@ -56,10 +71,87 @@ typedef struct {
 static SpeedDisplayCache speed_cache;
 static ImuDisplayCache imu_cache;
 
+static void Show_SpeedData(bool oled_ok);
+static void Show_ImuData(bool oled_ok);
+static void Show_ImuDataCached(bool oled_ok, bool read_sensor);
+
 static void Invalidate_DisplayCaches(void)
 {
     speed_cache.valid = 0U;
     imu_cache.valid = 0U;
+}
+
+static void AppOled_ShowPage(bool oled_ok)
+{
+    if (!oled_ok) return;
+
+    if (app_oled_page == APP_OLED_PAGE_SPEED) {
+        Show_SpeedData(oled_ok);
+        return;
+    }
+    if (app_oled_page == APP_OLED_PAGE_ANGLE) {
+        Show_ImuData(oled_ok);
+        return;
+    }
+
+    OLED_ClearFault();
+    OLED_Clear();
+    OLED_ShowString(1, 1, "MENU TEST");
+
+    switch (app_oled_page) {
+        case APP_OLED_PAGE_BUZZER:
+            OLED_ShowString(2, 1, "PAGE: BUZZER");
+            OLED_ShowString(3, 1, BoardIO_BuzzerIsOn() ? "BEEP: ON " : "BEEP: OFF");
+            break;
+        case APP_OLED_PAGE_LED:
+            OLED_ShowString(2, 1, "PAGE: LED");
+            OLED_ShowString(3, 1, BoardIO_LedIsOn() ? "LED: ON " : "LED: OFF");
+            break;
+        case APP_OLED_PAGE_ADC:
+            OLED_ShowString(2, 1, "PAGE: ADC CAL");
+            OLED_ShowString(3, 1, "FUNC: MARK");
+            break;
+        case APP_OLED_PAGE_IMU_CAL:
+            OLED_ShowString(2, 1, "PAGE: IMU CAL");
+            OLED_ShowString(3, 1, "FUNC: MARK");
+            break;
+        default:
+            OLED_ShowString(2, 1, "PAGE: ???");
+            OLED_ShowString(3, 1, "MENU NEXT");
+            break;
+    }
+
+    if (app_oled_ok) {
+        OLED_ShowString(4, 1, "OK");
+    } else {
+        OLED_ShowString(4, 1, "FUNC=OK");
+    }
+
+    display_layout = DISPLAY_LAYOUT_WAIT;
+    Invalidate_DisplayCaches();
+}
+
+static void AppOled_NextPage(bool oled_ok)
+{
+    app_oled_page++;
+    if (app_oled_page >= APP_OLED_PAGE_COUNT) {
+        app_oled_page = APP_OLED_PAGE_SPEED;
+    }
+    app_oled_ok = 0U;
+    AppOled_ShowPage(oled_ok);
+}
+
+static void AppOled_Function(bool oled_ok)
+{
+    app_oled_ok = 1U;
+
+    if (app_oled_page == APP_OLED_PAGE_BUZZER) {
+        BoardIO_BuzzerToggle();
+    } else if (app_oled_page == APP_OLED_PAGE_LED) {
+        BoardIO_LedToggle();
+    }
+
+    AppOled_ShowPage(oled_ok);
 }
 
 static void Show_WaitScreen(bool oled_ok)
@@ -242,61 +334,70 @@ static void Show_ImuData(bool oled_ok)
 
 static void Print_VofaData(void)
 {
-    int16_t actual_l = Motor_GetActual_L();
-    int16_t actual_r = Motor_GetActual_R();
-    int8_t pwm_l = Motor_GetPwm_L();
-    int8_t pwm_r = Motor_GetPwm_R();
-
+    /* SPD,AL,AR,PWML,PWMR: same compact stream on UART0 and Bluetooth. */
     if (g_StreamTarget == STREAM_TARGET_BLUETOOTH) {
-        /* 蓝牙 9600 波特率带宽有限，下地实测只发核心四列。 */
-        Bluetooth_Printf("%d,%d,%d,%d\r\n",
-                         (int)actual_l,
-                         (int)actual_r,
-                         (int)pwm_l,
-                         (int)pwm_r);
+        Bluetooth_Printf("SPD,%d,%d,%d,%d\r\n",
+                         (int)Motor_GetActual_L(),
+                         (int)Motor_GetActual_R(),
+                         (int)Motor_GetPwm_L(),
+                         (int)Motor_GetPwm_R());
     } else {
-        Serial_Printf("%d,%d,%d,%d,%d,%d,%d,%d\r\n",
-                      (int)Motor_GetTarget_L(),
-                      (int)Motor_GetTarget_R(),
-                      (int)actual_l,
-                      (int)actual_r,
-                      (int)pwm_l,
-                      (int)pwm_r,
-                      (int)SpeedFiltL,
-                      (int)SpeedFiltR);
+        Serial_Printf("SPD,%d,%d,%d,%d\r\n",
+                      (int)Motor_GetActual_L(),
+                      (int)Motor_GetActual_R(),
+                      (int)Motor_GetPwm_L(),
+                      (int)Motor_GetPwm_R());
     }
 }
-
 static void Print_ImuData(void)
 {
     IMUTest_Data imu;
     bool ok;
 
     ok = IMUTest_Read(&imu);
-    Serial_Printf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
-                  ok ? 1 : 0,
-                  (int)imu.AccelX,
-                  (int)imu.AccelY,
-                  (int)imu.AccelZ,
-                  (int)imu.GyroX,
-                  (int)imu.GyroY,
-                  (int)imu.GyroZ,
-                  (int)imu.MagX,
-                  (int)imu.MagY,
-                  (int)imu.MagZ,
-                  (int)imu.RollDeg,
-                  (int)imu.PitchDeg,
-                  (int)imu.YawDeg);
+    if (g_StreamTarget == STREAM_TARGET_BLUETOOTH) {
+        Bluetooth_Printf("IMU,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                         ok ? 1 : 0,
+                         (int)imu.AccelX,
+                         (int)imu.AccelY,
+                         (int)imu.AccelZ,
+                         (int)imu.GyroX,
+                         (int)imu.GyroY,
+                         (int)imu.GyroZ,
+                         (int)imu.MagX,
+                         (int)imu.MagY,
+                         (int)imu.MagZ,
+                         (int)imu.RollDeg,
+                         (int)imu.PitchDeg,
+                         (int)imu.YawDeg);
+    } else {
+        Serial_Printf("IMU,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                      ok ? 1 : 0,
+                      (int)imu.AccelX,
+                      (int)imu.AccelY,
+                      (int)imu.AccelZ,
+                      (int)imu.GyroX,
+                      (int)imu.GyroY,
+                      (int)imu.GyroZ,
+                      (int)imu.MagX,
+                      (int)imu.MagY,
+                      (int)imu.MagZ,
+                      (int)imu.RollDeg,
+                      (int)imu.PitchDeg,
+                      (int)imu.YawDeg);
+    }
 }
-
 int main(void)
 {
     uint8_t oled_tick = 0U;
+    uint8_t speed_stream_tick = 0U;
     uint8_t ir_stream_tick = 0U;
     uint8_t heading_stream_tick = 0U;
+    uint8_t mag_cal_stream_tick = 0U;
     bool oled_ok;
 
     SYSCFG_DL_init();
+    BoardIO_Init();
     Serial_Init();
     Bluetooth_Init();
     Delay_ms(100);  /* Wait for HC-06 to be ready */
@@ -313,47 +414,57 @@ int main(void)
 
     oled_ok = OLED_Init();
 
-    Stream_Printf("\r\n[PIDTUNE] MSPM0 UART0 PID command test\r\n");
-    Stream_Printf("[PIDTUNE] UART0 TX=PA10 RX=PA11 Baud=115200\r\n");
-    Stream_Printf("[PIDTUNE] HC-06 UART1 TX=PA8 RX=PA9 Baud=9600\r\n");
-    Stream_Printf("[PIDTUNE] TIMER_0=TIMG0 period=20ms\r\n");
-    Stream_Printf("[PIDTUNE] OLED I2C0 SCL=PA1 SDA=PA0 init=%s\r\n", oled_ok ? "OK" : "FAIL");
-    Stream_Printf("[PIDTUNE] IMU I2C0 shared bus: PA1/PA0, use m to test\r\n");
-    Stream_Printf("[PIDTUNE] TB6612 PWM: PWMA=PA27(C1), PWMB=PA26(C0), AIN1=PB6 AIN2=PB7 BIN1=PB8 BIN2=PB9\r\n");
-    Stream_Printf("[PIDTUNE] Encoder GPIO: L B04/B05, R B02/B03, t unit=counts/20ms\r\n");
-    Stream_Printf("[PIDTUNE] IR ADC1: L2 PA16, L1 PA17, R1 PB17, R2 PB18\r\n");
-    Stream_Printf("[PIDTUNE] Commands: t/l/r speed, o pwm open-loop, p/i/d PID, 0 stop, v stream, ? params, m page\r\n");
-    Stream_Printf("[PIDTUNE] Line follow: x ir stream 100ms(BT bits/pattern/state/diff/TL/TR/AL/AR), X ir once, f toggle, u base, q/a/e kept, 4-level ratio FSM\r\n");
-    Stream_Printf("[PIDTUNE] Heading drive: h toggle blank-straight, y stream 100ms, Y heading once, j/k/n heading PID, g diff limit, z output sign, c gyro sign\r\n");
-    Stream_Printf("[PIDTUNE] USB speed stream: TL,TR,AL,AR,PWML,PWMR,FiltL,FiltR\r\n");
-    Stream_Printf("[PIDTUNE] BT speed stream: AL,AR,PWML,PWMR when v from BT; use o20/o30/... to map PWM to speed\r\n[PIDTUNE] Angle page - VOFA columns: OK,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ,Roll,Pitch,Yaw\r\n");
-
-    Show_WaitScreen(oled_ok);
+    Stream_Printf("\r\n[CAR] MSPM0 ready UART0=115200 BT=9600 OLED=%s\r\n", oled_ok ? "OK" : "FAIL");
+    Stream_Printf("[IO] BT:TX=PA8 RX=PA9 | I2C:SCL=PA1 SDA=PA0 | IR8:OUT=PA16 AD0=PA17 AD1=PB17 AD2=PB18\r\n");
+    Stream_Printf("[CMD] ? stat | t/l/r speed | o pwm | p/i/d motorPID | f line | X/x ir | h/y/Y heading | M/C mag | 0 stop\r\n");
+    Stream_Printf("[CSV] v=SPD,AL,AR,PL,PR | x=IR8,raw1..8,norm1..8,str,err,bits,pat | y=HD,... | C=MAG,...\r\n");
+    AppOled_ShowPage(oled_ok);
 
     while (1) {
         CmdDispatch_Process();
 
         if (g_ImuDisplayDirty) {
             g_ImuDisplayDirty = 0U;
-            Show_ImuData(oled_ok);
         }
 
         if (g_DisplayDirty) {
             g_DisplayDirty = 0U;
-            Show_SpeedData(oled_ok);
         }
 
         if (g_SampleReady) {
-            g_SampleReady = 0U;
+            uint8_t sample_ticks = 0U;
+            float sample_dt_sec;
 
-            /* 红外 ADC 不放进中断；主循环按 20ms 节拍算下一拍左右轮目标速度。 */
-            if (LineFollow_IsEnabled()) {
-                LineFollow_Update();
-            } else if (HeadingDrive_IsEnabled()) {
-                HeadingDrive_Update();
+            __disable_irq();
+            sample_ticks = g_SampleTicks;
+            g_SampleTicks = 0U;
+            g_SampleReady = 0U;
+            __enable_irq();
+            if (sample_ticks == 0U) {
+                sample_ticks = 1U;
+            }
+            sample_dt_sec = 0.020f * (float)sample_ticks;
+
+            BoardIO_Update20ms();
+            if (BoardIO_MenuPressed()) {
+                AppOled_NextPage(oled_ok);
+            }
+            if (BoardIO_FuncPressed()) {
+                AppOled_Function(oled_ok);
             }
 
-            /* 红外连续流用于看传感器状态变化；采样仍是 20ms，日志降到 100ms。 */
+            /* IR8 GPIO mux is sampled in the main loop; line-follow target updates stay on the 20ms tick. */
+            if (g_MagAutoCal) {
+                CmdDispatch_UpdateMagAutoCal();
+            } else if (LineFollow_IsEnabled()) {
+                LineFollow_Update();
+            } else if (HeadingDrive_IsEnabled()) {
+                HeadingDrive_UpdateWithDt(sample_dt_sec);
+            } else if (g_HeadingStream) {
+                (void)Heading_UpdateWithDt(sample_dt_sec);
+            }
+
+            /* IR8 ADC stream is for observing sensor state; logs at 200ms. */
             if (g_IrStream) {
                 ir_stream_tick++;
                 if (ir_stream_tick >= IR_STREAM_PRINT_TICKS) {
@@ -374,32 +485,45 @@ int main(void)
                 heading_stream_tick = 0U;
             }
 
-            /* 巡线时保持主循环轻量；速度流会抢占主循环时间，调试巡线请用 100ms 的 x 流。 */
+            if (g_MagCalStream) {
+                mag_cal_stream_tick++;
+                if (mag_cal_stream_tick >= MAG_CAL_STREAM_PRINT_TICKS) {
+                    mag_cal_stream_tick = 0U;
+                    CmdDispatch_PrintMagCal(g_MagCalStreamTarget);
+                }
+            } else {
+                mag_cal_stream_tick = 0U;
+            }
+
+            /* Keep the main loop light while following; use the 200ms x stream for line debug. */
             if (g_Stream && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled()) && (g_DisplayMode == 1U)) {
                 Print_ImuData();
             }
 
-            if ((!g_IrStream) && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled())) {
-                oled_tick++;
-            }
-            if ((!g_IrStream) && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled()) &&
-                (oled_tick >= OLED_UPDATE_TICKS)) {
+            oled_tick++;
+            if (oled_tick >= OLED_UPDATE_TICKS) {
                 oled_tick = 0U;
-                if (g_DisplayMode == 1U) {
-                    if (g_Stream) {
-                        /* 角度流打印已经读过一次 IMU，这里只显示缓存，避免同一周期重复读 I2C。 */
-                        Show_ImuDataCached(oled_ok, false);
-                    } else {
-                        Show_ImuData(oled_ok);
-                    }
-                } else {
+                if (app_oled_page == APP_OLED_PAGE_SPEED) {
                     Show_SpeedData(oled_ok);
+                } else if ((app_oled_page == APP_OLED_PAGE_ANGLE) &&
+                           (!g_IrStream) && (!g_MagAutoCal) &&
+                           (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled())) {
+                    /* If the y stream already updated IMU this tick, reuse the cache to avoid duplicate I2C reads. */
+                    Show_ImuDataCached(oled_ok, g_HeadingStream ? false : true);
                 }
             }
 
             if (g_Stream && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled()) && (g_DisplayMode != 1U)) {
-                Print_VofaData();
+                speed_stream_tick++;
+                if (speed_stream_tick >= SPEED_STREAM_PRINT_TICKS) {
+                    speed_stream_tick = 0U;
+                    Print_VofaData();
+                }
+            } else {
+                speed_stream_tick = 0U;
             }
         }
     }
 }
+
+
