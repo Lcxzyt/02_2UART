@@ -1,6 +1,7 @@
 #include "AutoTrackTask.h"
 #include "BoardIO.h"
 #include "CmdDispatch.h"
+#include "Heading.h"
 #include "HeadingDrive.h"
 #include "LineFollow.h"
 #include "Motor.h"
@@ -9,6 +10,7 @@
 
 #define AUTO_STRAIGHT_SPEED          40
 #define AUTO_ARC_SPEED               35
+#define AUTO_HD_KI                   0.03f
 #define AUTO_LINE_ACTIVE_THRESHOLD   500U
 #define AUTO_BLACK_STRENGTH_MIN      400U
 #define AUTO_WHITE_STRENGTH_MAX      300U
@@ -197,6 +199,7 @@ static uint8_t AutoTrackTask_StartStraight(int16_t target_yaw)
     }
     Motor_OpenLoop_Stop();
     HeadingDrive_SetBaseSpeed(AUTO_STRAIGHT_SPEED);
+    HeadingDrive_SetTunings(0.800f, AUTO_HD_KI, 0.250f);
     HeadingDrive_SetTargetYaw(target_yaw);
     auto_target_yaw = AutoTrackTask_NormalizeYaw(target_yaw);
     if (!HeadingDrive_StartStraight()) {
@@ -305,8 +308,6 @@ static void AutoTrackTask_UpdateStraightCD(float dt_sec)
         return;
     }
 
-    dt_sec +=180.0f;
-    if(dt_sec >= 360.0f) dt_sec = dt_sec - 360.0f;
     HeadingDrive_UpdateWithDt(dt_sec);
 
     if (auto_segment_ticks >= AUTO_STRAIGHT_TIMEOUT_TICKS) {
@@ -314,9 +315,14 @@ static void AutoTrackTask_UpdateStraightCD(float dt_sec)
     }
 }
 
-static void AutoTrackTask_UpdateFollow(uint8_t is_last_arc)
+static void AutoTrackTask_UpdateFollow(uint8_t is_last_arc, float dt_sec)
 {
     const Tracking_Data *track;
+
+    /* Keep heading yaw alive during the curve so it doesn't freeze.
+       This prevents a huge yaw jump when HeadingDrive resumes on the
+       next straight segment. */
+    Heading_UpdateWithDt(dt_sec);
 
     if (!AutoTrackTask_ReadTrack(&track)) {
         AutoTrackTask_EnterError(AUTO_TRACK_ERROR_SENSOR);
@@ -416,13 +422,13 @@ void AutoTrackTask_Update(float dt_sec)
             AutoTrackTask_UpdateStraightAB(dt_sec);
             break;
         case AUTO_TRACK_STATE_FOLLOW_BC:
-            AutoTrackTask_UpdateFollow(0U);
+            AutoTrackTask_UpdateFollow(0U, dt_sec);
             break;
         case AUTO_TRACK_STATE_STRAIGHT_CD:
             AutoTrackTask_UpdateStraightCD(dt_sec);
             break;
         case AUTO_TRACK_STATE_FOLLOW_DA:
-            AutoTrackTask_UpdateFollow(1U);
+            AutoTrackTask_UpdateFollow(1U, dt_sec);
             break;
         case AUTO_TRACK_STATE_FINISHED:
         case AUTO_TRACK_STATE_ERROR:
