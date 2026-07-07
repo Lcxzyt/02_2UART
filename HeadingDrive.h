@@ -22,6 +22,9 @@ typedef struct {
 } HeadingDrive_Data;
 
 void HeadingDrive_Init(void);
+uint8_t HeadingDrive_CaptureTarget(void);
+void HeadingDrive_SetTargetYaw(int16_t yaw_deg);
+uint8_t HeadingDrive_StartStraight(void);
 void HeadingDrive_Start(void);
 void HeadingDrive_Stop(void);
 void HeadingDrive_Update(void);
@@ -43,6 +46,7 @@ int16_t HeadingDrive_GetTargetYaw(void);
 int16_t HeadingDrive_GetCurrentYaw(void);
 int16_t HeadingDrive_GetErrorDeg(void);
 int16_t HeadingDrive_GetLastDiff(void);
+uint8_t HeadingDrive_HasTarget(void);
 int32_t HeadingDrive_GetIntegral(void);
 const HeadingDrive_Data *HeadingDrive_GetData(void);
 

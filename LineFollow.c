@@ -222,11 +222,31 @@ void LineFollow_GetTunings(float *kp, float *ki, float *kd)
     if (kd != 0) *kd = lf_kd;
 }
 
-void LineFollow_Update(void)
+void LineFollow_UpdateWithTrack(const Tracking_Data *track)
 {
-    const Tracking_Data *track;
     uint8_t bits;
 
+    if (!lf_enabled) return;
+
+    if ((track == 0) || (!track->valid)) {
+        lf_state = LF_STATE_LOST;
+        LineFollow_ResetState();
+        LineFollow_SetTargets(0, 0);
+        return;
+    }
+
+    bits = LineFollow_UpdateBits(track);
+
+    if (bits == 0U) {
+        LineFollow_RecoverLost();
+        return;
+    }
+
+    LineFollow_TrackPid(track, bits);
+}
+
+void LineFollow_Update(void)
+{
     if (!lf_enabled) return;
 
     if (!Tracking_Update()) {
@@ -236,15 +256,7 @@ void LineFollow_Update(void)
         return;
     }
 
-    track = Tracking_GetData();
-    bits = LineFollow_UpdateBits(track);
-
-    if (bits == 0U) {
-        LineFollow_RecoverLost();
-        return;
-    }
-
-    LineFollow_TrackPid(track, bits);
+    LineFollow_UpdateWithTrack(Tracking_GetData());
 }
 
 uint8_t LineFollow_IsEnabled(void) { return lf_enabled; }

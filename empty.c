@@ -2,6 +2,7 @@
 #include "Serial.h"
 #include "Bluetooth.h"
 #include "BoardIO.h"
+#include "AutoTrackTask.h"
 #include "OLED.h"
 #include "Motor.h"
 #include "Encoder.h"
@@ -9,7 +10,6 @@
 #include "Timer.h"
 #include "Tracking.h"
 #include "LineFollow.h"
-#include "Heading.h"
 #include "HeadingDrive.h"
 #include "IMUTest.h"
 #include "delay.h"
@@ -24,13 +24,14 @@
 #define SPEED_STREAM_PRINT_TICKS 5U
 /* IR ADC stream prints every 200ms to avoid slowing 9600 baud Bluetooth. */
 #define IR_STREAM_PRINT_TICKS 10U
-/* Heading stream also prints every 100ms to avoid slowing 9600 baud Bluetooth. */
-#define HEADING_STREAM_PRINT_TICKS 5U
+/* IMU stream also prints every 100ms to avoid slowing 9600 baud Bluetooth. */
+#define IMU_STREAM_PRINT_TICKS 5U
 /* Debug streams print every 100ms to avoid slowing the main loop. */
 #define MAG_CAL_STREAM_PRINT_TICKS 5U
 #define DISPLAY_LAYOUT_WAIT 0U
 #define DISPLAY_LAYOUT_SPEED 1U
 #define DISPLAY_LAYOUT_IMU 2U
+#define DISPLAY_LAYOUT_TASK1 3U
 
 #define APP_OLED_PAGE_SPEED   0U
 #define APP_OLED_PAGE_ANGLE   1U
@@ -74,6 +75,7 @@ static ImuDisplayCache imu_cache;
 static void Show_SpeedData(bool oled_ok);
 static void Show_ImuData(bool oled_ok);
 static void Show_ImuDataCached(bool oled_ok, bool read_sensor);
+static void Show_Task1Data(bool oled_ok);
 
 static void Invalidate_DisplayCaches(void)
 {
@@ -93,6 +95,10 @@ static void AppOled_ShowPage(bool oled_ok)
         Show_ImuData(oled_ok);
         return;
     }
+    if (app_oled_page == APP_OLED_PAGE_ADC) {
+        Show_Task1Data(oled_ok);
+        return;
+    }
 
     OLED_ClearFault();
     OLED_Clear();
@@ -106,10 +112,6 @@ static void AppOled_ShowPage(bool oled_ok)
         case APP_OLED_PAGE_LED:
             OLED_ShowString(2, 1, "PAGE: LED");
             OLED_ShowString(3, 1, BoardIO_LedIsOn() ? "LED: ON " : "LED: OFF");
-            break;
-        case APP_OLED_PAGE_ADC:
-            OLED_ShowString(2, 1, "PAGE: ADC CAL");
-            OLED_ShowString(3, 1, "FUNC: MARK");
             break;
         case APP_OLED_PAGE_IMU_CAL:
             OLED_ShowString(2, 1, "PAGE: IMU CAL");
@@ -143,6 +145,16 @@ static void AppOled_NextPage(bool oled_ok)
 
 static void AppOled_Function(bool oled_ok)
 {
+    if (app_oled_page == APP_OLED_PAGE_ADC) {
+        if (AutoTrackTask_IsActive() || AutoTrackTask_IsRunning()) {
+            AutoTrackTask_Stop();
+        } else {
+            AutoTrackTask_Start();
+        }
+        Show_Task1Data(oled_ok);
+        return;
+    }
+
     app_oled_ok = 1U;
 
     if (app_oled_page == APP_OLED_PAGE_BUZZER) {
@@ -152,6 +164,80 @@ static void AppOled_Function(bool oled_ok)
     }
 
     AppOled_ShowPage(oled_ok);
+}
+
+static const char *Task1_StateText(uint8_t state, uint8_t error)
+{
+    switch (state) {
+        case AUTO_TRACK_STATE_IDLE:        return "ST:IDLE         ";
+        case AUTO_TRACK_STATE_PRECHECK:    return "ST:CHECK A WHITE";
+        case AUTO_TRACK_STATE_STRAIGHT_AB: return "ST:STRAIGHT A-B ";
+        case AUTO_TRACK_STATE_FOLLOW_BC:   return "ST:FOLLOW B-C   ";
+        case AUTO_TRACK_STATE_STRAIGHT_CD: return "ST:STRAIGHT C-D ";
+        case AUTO_TRACK_STATE_FOLLOW_DA:   return "ST:FOLLOW D-A   ";
+        case AUTO_TRACK_STATE_FINISHED:    return "ST:DONE         ";
+        case AUTO_TRACK_STATE_ERROR:
+            switch (error) {
+                case AUTO_TRACK_ERROR_HEADING:   return "ERR:HEADING     ";
+                case AUTO_TRACK_ERROR_SENSOR:    return "ERR:IR SENSOR   ";
+                case AUTO_TRACK_ERROR_NOT_WHITE: return "ERR:A NOT WHITE ";
+                case AUTO_TRACK_ERROR_TIMEOUT:   return "ERR:TIMEOUT     ";
+                default:                         return "ERR:UNKNOWN     ";
+            }
+        default: return "ST:UNKNOWN      ";
+    }
+}
+
+static void Ensure_Task1Layout(bool oled_ok)
+{
+    if (!oled_ok) return;
+
+    OLED_ClearFault();
+
+    if (display_layout != DISPLAY_LAYOUT_TASK1) {
+        OLED_Clear();
+        OLED_ShowString(1, 1, "TASK1 AUTO");
+        OLED_ShowString(3, 1, "B00 W00 E+0000 ");
+        OLED_ShowString(4, 1, "F=STRT T000    ");
+        display_layout = DISPLAY_LAYOUT_TASK1;
+    }
+}
+
+static void Show_Task1Data(bool oled_ok)
+{
+    uint8_t black_count;
+    uint8_t white_count;
+    int16_t line_error;
+    int16_t target_yaw;
+
+    if (!oled_ok) return;
+
+    Ensure_Task1Layout(oled_ok);
+
+    OLED_ShowString(2, 1, Task1_StateText(AutoTrackTask_GetState(), AutoTrackTask_GetError()));
+
+    black_count = AutoTrackTask_GetBlackCount();
+    white_count = AutoTrackTask_GetWhiteCount();
+    if (black_count > 99U) black_count = 99U;
+    if (white_count > 99U) white_count = 99U;
+    OLED_ShowNum(3, 2, black_count, 2);
+    OLED_ShowNum(3, 6, white_count, 2);
+
+    line_error = AutoTrackTask_GetLineError();
+    if (line_error > 9999) line_error = 9999;
+    if (line_error < -9999) line_error = -9999;
+    OLED_ShowSignedNum(3, 10, line_error, 4);
+
+    if (AutoTrackTask_IsActive() || AutoTrackTask_IsRunning()) {
+        OLED_ShowString(4, 1, "F=STOP T");
+    } else {
+        OLED_ShowString(4, 1, "F=STRT T");
+    }
+    target_yaw = AutoTrackTask_GetTargetYaw();
+    if (target_yaw < 0) target_yaw = 0;
+    if (target_yaw > 359) target_yaw = 359;
+    OLED_ShowNum(4, 9, (uint32_t)target_yaw, 3);
+    OLED_ShowString(4, 12, "    ");
 }
 
 static void Show_WaitScreen(bool oled_ok)
@@ -392,12 +478,13 @@ int main(void)
     uint8_t oled_tick = 0U;
     uint8_t speed_stream_tick = 0U;
     uint8_t ir_stream_tick = 0U;
-    uint8_t heading_stream_tick = 0U;
+    uint8_t imu_stream_tick = 0U;
     uint8_t mag_cal_stream_tick = 0U;
     bool oled_ok;
 
     SYSCFG_DL_init();
     BoardIO_Init();
+    AutoTrackTask_Init();
     Serial_Init();
     Bluetooth_Init();
     Delay_ms(100);  /* Wait for HC-06 to be ready */
@@ -406,8 +493,8 @@ int main(void)
     Encoder_Init();
     Tracking_Init();
     LineFollow_Init();
-    (void)Heading_Init();
     HeadingDrive_Init();
+    (void)IMUTest_Init();
     Motor_Control_Stop();
 
     Timer_Init();
@@ -416,8 +503,8 @@ int main(void)
 
     Stream_Printf("\r\n[CAR] MSPM0 ready UART0=115200 BT=9600 OLED=%s\r\n", oled_ok ? "OK" : "FAIL");
     Stream_Printf("[IO] BT:TX=PA8 RX=PA9 | I2C:SCL=PA1 SDA=PA0 | IR8:OUT=PA16 AD0=PA17 AD1=PB17 AD2=PB18\r\n");
-    Stream_Printf("[CMD] ? stat | t/l/r speed | o pwm | p/i/d motorPID | f line | X/x ir | h/y/Y heading | M/C mag | 0 stop\r\n");
-    Stream_Printf("[CSV] v=SPD,AL,AR,PL,PR | x=IR8,raw1..8,norm1..8,str,err,bits,pat | y=HD,... | C=MAG,...\r\n");
+    Stream_Printf("[CMD] ? stat | t/l/r speed | o pwm | p/i/d motorPID | f line | hi lock, h[spd] go, h0 stop | X/x ir | y/Y imu | M/C mag | 0 stop\r\n");
+    Stream_Printf("[CSV] v=SPD,AL,AR,PL,PR | x=IR8,raw1..8,norm1..8,str,err,bits,pat | y=IMU,... | C=MAG,...\r\n");
     AppOled_ShowPage(oled_ok);
 
     while (1) {
@@ -433,8 +520,6 @@ int main(void)
 
         if (g_SampleReady) {
             uint8_t sample_ticks = 0U;
-            float sample_dt_sec;
-
             __disable_irq();
             sample_ticks = g_SampleTicks;
             g_SampleTicks = 0U;
@@ -443,8 +528,6 @@ int main(void)
             if (sample_ticks == 0U) {
                 sample_ticks = 1U;
             }
-            sample_dt_sec = 0.020f * (float)sample_ticks;
-
             BoardIO_Update20ms();
             if (BoardIO_MenuPressed()) {
                 AppOled_NextPage(oled_ok);
@@ -453,15 +536,15 @@ int main(void)
                 AppOled_Function(oled_ok);
             }
 
-            /* IR8 GPIO mux is sampled in the main loop; line-follow target updates stay on the 20ms tick. */
-            if (g_MagAutoCal) {
+            /* Automatic task owns both straight driving and line following while active. */
+            if (AutoTrackTask_IsActive()) {
+                AutoTrackTask_Update((float)sample_ticks * 0.020f);
+            } else if (g_MagAutoCal) {
                 CmdDispatch_UpdateMagAutoCal();
             } else if (LineFollow_IsEnabled()) {
                 LineFollow_Update();
             } else if (HeadingDrive_IsEnabled()) {
-                HeadingDrive_UpdateWithDt(sample_dt_sec);
-            } else if (g_HeadingStream) {
-                (void)Heading_UpdateWithDt(sample_dt_sec);
+                HeadingDrive_UpdateWithDt((float)sample_ticks * 0.020f);
             }
 
             /* IR8 ADC stream is for observing sensor state; logs at 200ms. */
@@ -475,14 +558,14 @@ int main(void)
                 ir_stream_tick = 0U;
             }
 
-            if (g_HeadingStream) {
-                heading_stream_tick++;
-                if (heading_stream_tick >= HEADING_STREAM_PRINT_TICKS) {
-                    heading_stream_tick = 0U;
-                    CmdDispatch_PrintHeading(g_HeadingStreamTarget);
+            if (g_ImuStream) {
+                imu_stream_tick++;
+                if (imu_stream_tick >= IMU_STREAM_PRINT_TICKS) {
+                    imu_stream_tick = 0U;
+                    CmdDispatch_PrintImu(g_ImuStreamTarget);
                 }
             } else {
-                heading_stream_tick = 0U;
+                imu_stream_tick = 0U;
             }
 
             if (g_MagCalStream) {
@@ -496,7 +579,7 @@ int main(void)
             }
 
             /* Keep the main loop light while following; use the 200ms x stream for line debug. */
-            if (g_Stream && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled()) && (g_DisplayMode == 1U)) {
+            if (g_Stream && (!LineFollow_IsEnabled()) && (g_DisplayMode == 1U)) {
                 Print_ImuData();
             }
 
@@ -507,13 +590,14 @@ int main(void)
                     Show_SpeedData(oled_ok);
                 } else if ((app_oled_page == APP_OLED_PAGE_ANGLE) &&
                            (!g_IrStream) && (!g_MagAutoCal) &&
-                           (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled())) {
-                    /* If the y stream already updated IMU this tick, reuse the cache to avoid duplicate I2C reads. */
-                    Show_ImuDataCached(oled_ok, g_HeadingStream ? false : true);
+                           (!LineFollow_IsEnabled()) && (!AutoTrackTask_IsActive())) {
+                    Show_ImuDataCached(oled_ok, true);
+                } else if (app_oled_page == APP_OLED_PAGE_ADC) {
+                    Show_Task1Data(oled_ok);
                 }
             }
 
-            if (g_Stream && (!LineFollow_IsEnabled()) && (!HeadingDrive_IsEnabled()) && (g_DisplayMode != 1U)) {
+            if (g_Stream && (!LineFollow_IsEnabled()) && (g_DisplayMode != 1U)) {
                 speed_stream_tick++;
                 if (speed_stream_tick >= SPEED_STREAM_PRINT_TICKS) {
                     speed_stream_tick = 0U;

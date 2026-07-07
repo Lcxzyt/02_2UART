@@ -2,6 +2,7 @@
 #define __LINE_FOLLOW_H
 
 #include <stdint.h>
+#include "Tracking.h"
 
 #define LF_STATE_LOST 0U
 #define LF_STATE_TRACK 1U
@@ -12,6 +13,7 @@ void LineFollow_Init(void);
 void LineFollow_Start(void);
 void LineFollow_Stop(void);
 void LineFollow_Update(void);
+void LineFollow_UpdateWithTrack(const Tracking_Data *track);
 
 void LineFollow_SetBaseSpeed(int16_t speed);
 void LineFollow_SetTunings(float kp, float ki, float kd);

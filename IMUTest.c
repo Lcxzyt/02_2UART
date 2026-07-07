@@ -8,16 +8,11 @@
 #include <stdio.h>
 
 #define IMU_PRINTF_BUF_SIZE 160U
-#define IMU_TEST_DT_SEC     (0.02f)
-#define GYRO_SCALE          (1.0f / 16.4f)
-#define ACCEL_SCALE         (9.80665f / 16384.0f)
 #define MAG_SCALE           (100.0f / 3000.0f)
 
 static IMUTest_Data imu_last;
 static bool imu_inited = false;
 static bool imu_init_tried = false;
-static IMU_Kalman1D imu_kf_roll;
-static IMU_Kalman1D imu_kf_pitch;
 
 static void IMUTest_Printf(char *format, ...)
 {
@@ -48,26 +43,6 @@ static int16_t IMUTest_RoundNormalizeYaw(float yaw)
     return IMUTest_RoundDeg(yaw);
 }
 
-static void IMUTest_RawToScaled(const IMU_RawData *raw, IMU_ScaledData *sc)
-{
-    float ox = 0.0f;
-    float oy = 0.0f;
-    float oz = 0.0f;
-
-    IMU_GetMagOffsets(&ox, &oy, &oz);
-
-    sc->AccelX = (float)raw->AccelX * ACCEL_SCALE;
-    sc->AccelY = (float)raw->AccelY * ACCEL_SCALE;
-    sc->AccelZ = (float)raw->AccelZ * ACCEL_SCALE;
-    sc->GyroX = (float)raw->GyroX * GYRO_SCALE;
-    sc->GyroY = (float)raw->GyroY * GYRO_SCALE;
-    sc->GyroZ = (float)raw->GyroZ * GYRO_SCALE;
-    sc->MagX = ((float)raw->MagX * MAG_SCALE) - ox;
-    sc->MagY = ((float)raw->MagY * MAG_SCALE) - oy;
-    sc->MagZ = ((float)raw->MagZ * MAG_SCALE) - oz;
-    sc->Temperature = ((float)raw->TempRaw / 340.0f) + 36.53f;
-}
-
 bool IMUTest_Init(void)
 {
     imu_init_tried = true;
@@ -79,23 +54,19 @@ bool IMUTest_Init(void)
     imu_last.MpuOk = (imu_last.MpuId == 0x68U) || (imu_last.MpuId == 0x72U);
     imu_last.MagOk = imu_inited;
 
-    IMU_KalmanInit(&imu_kf_roll, 0.001f, 0.003f, 0.03f);
-    IMU_KalmanInit(&imu_kf_pitch, 0.001f, 0.003f, 0.03f);
 
-    return (imu_inited && (IMU_IsInitialized() != 0U));
+    return imu_inited;
 }
 
 bool IMUTest_ReadMagRaw(int16_t *magX, int16_t *magY, int16_t *magZ)
 {
     IMU_RawData raw;
-    uint8_t mpu_ok = 0U;
-    uint8_t mag_ok = 0U;
 
     if (!imu_init_tried) {
         (void)IMUTest_Init();
     }
 
-    (void)IMU_ReadRawStatus(&raw, &mpu_ok, &mag_ok);
+    IMU_ReadRaw(&raw);
 
     if (magX != 0) *magX = raw.MagX;
     if (magY != 0) *magY = raw.MagY;
@@ -104,9 +75,9 @@ bool IMUTest_ReadMagRaw(int16_t *magX, int16_t *magY, int16_t *magZ)
     imu_last.MagX = raw.MagX;
     imu_last.MagY = raw.MagY;
     imu_last.MagZ = raw.MagZ;
-    imu_last.MpuOk = (mpu_ok != 0U);
-    imu_last.MagOk = (mag_ok != 0U);
-    return (mag_ok != 0U);
+    imu_last.MpuOk = imu_inited;
+    imu_last.MagOk = imu_inited;
+    return imu_inited;
 }
 
 void IMUTest_SetMagCalibration(float offsetX, float offsetY, float offsetZ,
@@ -142,17 +113,15 @@ bool IMUTest_Read(IMUTest_Data *data)
     IMU_RawData raw;
     IMU_ScaledData sc;
     IMU_Attitude att;
-    uint8_t mpu_ok = 0U;
-    uint8_t mag_ok = 0U;
 
     if (!imu_init_tried) {
         (void)IMUTest_Init();
     }
 
-    (void)IMU_ReadRawStatus(&raw, &mpu_ok, &mag_ok);
-    IMUTest_RawToScaled(&raw, &sc);
-    if (mpu_ok && mag_ok) {
-        IMU_GetAttitudeKF(&imu_kf_roll, &imu_kf_pitch, &sc, &att, IMU_TEST_DT_SEC);
+    IMU_ReadRaw(&raw);
+    IMU_ReadScaled(&sc);
+    if (imu_inited) {
+        IMU_GetAttitudeRaw(&sc, &att);
     } else {
         att.Roll = 0.0f;
         att.Pitch = 0.0f;
@@ -174,14 +143,14 @@ bool IMUTest_Read(IMUTest_Data *data)
     imu_last.MpuId = MPU6050_GetID();
     imu_last.MagAddr = QMC5883L_GetAddr();
     imu_last.MagId = QMC5883L_GetID();
-    imu_last.MpuOk = (mpu_ok != 0U);
-    imu_last.MagOk = (mag_ok != 0U);
+    imu_last.MpuOk = imu_inited;
+    imu_last.MagOk = imu_inited;
 
     if (data != 0) {
         *data = imu_last;
     }
 
-    return (mpu_ok && mag_ok) ? true : false;
+    return imu_inited;
 }
 
 bool IMUTest_Print(void)
@@ -201,7 +170,7 @@ bool IMUTest_Print(void)
     oy100 = (int)((oy >= 0.0f) ? ((oy * 100.0f) + 0.5f) : ((oy * 100.0f) - 0.5f));
     oz100 = (int)((oz >= 0.0f) ? ((oz * 100.0f) + 0.5f) : ((oz * 100.0f) - 0.5f));
 
-    IMUTest_Printf("[IMU] STM32 logic Raw->Scaled->KF Roll/Pitch + tilt-comp Mag Yaw %s\r\n",
+    IMUTest_Printf("[IMU] GitHub direct Raw->Accel Roll/Pitch + tilt-comp Mag Yaw %s\r\n",
                    ok ? "OK" : "WARN");
     IMUTest_Printf("[IMU] MPU6050 addr=0x68 id=0x%02X %s bypass=%u\r\n",
                    data.MpuId,
@@ -232,5 +201,5 @@ void IMUTest_GetLast(IMUTest_Data *data)
 
 bool IMUTest_IsReady(void)
 {
-    return (imu_inited && (IMU_IsInitialized() != 0U));
+    return imu_inited;
 }

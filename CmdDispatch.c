@@ -2,10 +2,9 @@
 #include "Motor.h"
 #include "Encoder.h"
 #include "Bluetooth.h"
-#include "Heading.h"
-#include "HeadingDrive.h"
 #include "IMUTest.h"
 #include "LineFollow.h"
+#include "HeadingDrive.h"
 #include "Serial.h"
 #include "Tracking.h"
 #include "Timer.h"
@@ -43,8 +42,8 @@ volatile uint8_t g_Stream = 0;
 volatile uint8_t g_StreamTarget = STREAM_TARGET_NONE;
 volatile uint8_t g_IrStream = 0;
 volatile uint8_t g_IrStreamTarget = STREAM_TARGET_NONE;
-volatile uint8_t g_HeadingStream = 0;
-volatile uint8_t g_HeadingStreamTarget = STREAM_TARGET_NONE;
+volatile uint8_t g_ImuStream = 0;
+volatile uint8_t g_ImuStreamTarget = STREAM_TARGET_NONE;
 volatile uint8_t g_MagCalStream = 0;
 volatile uint8_t g_MagCalStreamTarget = STREAM_TARGET_NONE;
 volatile uint8_t g_MagAutoCal = 0;
@@ -66,6 +65,8 @@ static uint8_t mag_cal_has_sample;
 static uint16_t mag_auto_cal_ticks;
 static uint8_t mag_auto_cal_target = STREAM_TARGET_NONE;
 static uint8_t mag_auto_cal_fail_count;
+
+static void CmdDispatch_CancelMagAutoCal(uint8_t source);
 
 static int32_t Float_ToInt(float value)
 {
@@ -99,13 +100,12 @@ static int16_t Clamp_Target(int16_t target)
 
 static void Apply_Targets(void)
 {
-    if (LineFollow_IsEnabled()) {
-        LineFollow_Stop();
-    }
     if (HeadingDrive_IsEnabled()) {
         HeadingDrive_Stop();
     }
-
+    if (LineFollow_IsEnabled()) {
+        LineFollow_Stop();
+    }
     if (!g_Run) {
         Motor_Control_Stop();
         Timer_ResetSpeedFilter();
@@ -128,20 +128,19 @@ static void Print_Gain(uint8_t target, char *name, float v)
 static void Print_Params(uint8_t target)
 {
     float kp, ki, kd;
-    float hkp, hki, hkd;
     float lkp, lki, lkd;
-    const Heading_Data *heading = Heading_GetData();
+    IMUTest_Data imu;
 
     Motor_PID_GetTunings(&kp, &ki, &kd);
-    HeadingDrive_GetTunings(&hkp, &hki, &hkd);
     LineFollow_GetTunings(&lkp, &lki, &lkd);
+    IMUTest_GetLast(&imu);
 
     Param_Printf(target,
-        "STAT Run=%u V=%u IR=%u HS=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu\r\n",
+        "STAT Run=%u V=%u IR=%u IMU=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu\r\n",
         (unsigned int)g_Run,
         (unsigned int)g_Stream,
         (unsigned int)g_IrStream,
-        (unsigned int)g_HeadingStream,
+        (unsigned int)g_ImuStream,
         (unsigned int)g_MagCalStream,
         (unsigned int)g_MagAutoCal,
         (int)Motor_GetTarget_L(),
@@ -157,25 +156,29 @@ static void Print_Params(uint8_t target)
     Print_Gain(target, "Kp", kp);
     Print_Gain(target, "Ki", ki);
     Print_Gain(target, "Kd", kd);
-    Print_Gain(target, "HKp", hkp);
-    Print_Gain(target, "HKi", hki);
-    Print_Gain(target, "HKd", hkd);
     Print_Gain(target, "LKp", lkp);
     Print_Gain(target, "LKi", lki);
     Print_Gain(target, "LKd", lkd);
     Param_Printf(target,
-        "LF=%u/%u B=%02X E=%d HD=%u/%u Y=%d T=%d HE=%d IMU=%u/%u\r\n",
+        "LF=%u/%u B=%02X E=%d Y=%d IMU=%u/%u\r\n",
         (unsigned int)LineFollow_IsEnabled(),
         (unsigned int)LineFollow_GetState(),
         (unsigned int)LineFollow_GetBits(),
         (int)LineFollow_GetLastError(),
+        (int)imu.YawDeg,
+        (unsigned int)imu.MpuOk,
+        (unsigned int)imu.MagOk);
+
+    Param_Printf(target,
+        "HD=%u/%u/%u B=%d TY=%d CY=%d HE=%d D=%d\r\n",
         (unsigned int)HeadingDrive_IsEnabled(),
+        (unsigned int)HeadingDrive_HasTarget(),
         (unsigned int)HeadingDrive_GetState(),
-        (int)Heading_GetYawDeg(),
+        (int)HeadingDrive_GetBaseSpeed(),
         (int)HeadingDrive_GetTargetYaw(),
+        (int)HeadingDrive_GetCurrentYaw(),
         (int)HeadingDrive_GetErrorDeg(),
-        (unsigned int)heading->mpu_ok,
-        (unsigned int)heading->mag_ok);
+        (int)HeadingDrive_GetLastDiff());
 
     if (g_DisplayMode == 1U) {
         g_ImuDisplayDirty = 1U;
@@ -189,25 +192,21 @@ static uint8_t Is_LineCmd(uint8_t c)
             c == 'd' || c == 'D' || c == 't' || c == 'T' ||
             c == 'b' || c == 'B' || c == 'l' || c == 'L' ||
             c == 'r' || c == 'R' || c == 'u' || c == 'U' ||
-            c == 'j' || c == 'J' || c == 'k' || c == 'K' ||
-            c == 'n' || c == 'N' || c == 'g' || c == 'G' ||
-            c == 'z' || c == 'Z' || c == 'c' ||
             c == 'q' || c == 'Q' || c == 'w' || c == 'W' ||
             c == 'e' || c == 'E' ||
+            c == 'h' || c == 'H' ||
             c == 'o' || c == 'O');
 }
 
 static void Parse_TuneLine(char *line, uint8_t source)
 {
     float kp, ki, kd;
-    float hkp, hki, hkd;
     float lkp, lki, lkd;
     int16_t value;
     char c = line[0];
     if (c >= 'A' && c <= 'Z') c += 32;
 
     Motor_PID_GetTunings(&kp, &ki, &kd);
-    HeadingDrive_GetTunings(&hkp, &hki, &hkd);
     LineFollow_GetTunings(&lkp, &lki, &lkd);
     value = Clamp_Target((int16_t)atoi(line + 1));
 
@@ -236,27 +235,6 @@ static void Parse_TuneLine(char *line, uint8_t source)
             lkd = (float)atof(line + 1);
             LineFollow_SetTunings(lkp, lki, lkd);
             break;
-        case 'j':
-            hkp = (float)atof(line + 1);
-            HeadingDrive_SetTunings(hkp, hki, hkd);
-            break;
-        case 'k':
-            hki = (float)atof(line + 1);
-            HeadingDrive_SetTunings(hkp, hki, hkd);
-            break;
-        case 'n':
-            hkd = (float)atof(line + 1);
-            HeadingDrive_SetTunings(hkp, hki, hkd);
-            break;
-        case 'g':
-            HeadingDrive_SetDiffLimit(value);
-            break;
-        case 'z':
-            HeadingDrive_SetOutputSign((int8_t)atoi(line + 1));
-            break;
-        case 'c':
-            Heading_SetGyroZSign((int8_t)atoi(line + 1));
-            break;
         case 't':
         case 'b':
             cmd_target_l = value;
@@ -276,6 +254,47 @@ static void Parse_TuneLine(char *line, uint8_t source)
             g_Run = (value != 0) ? 1U : 0U;
             Apply_Targets();
             break;
+        case 'h':
+            if (line[1] == '0' || line[1] == 's' || line[1] == 'S') {
+                HeadingDrive_Stop();
+                g_Run = 0U;
+                Param_Printf(source, "HD stop\r\n");
+            } else if (line[1] == 'i' || line[1] == 'I') {
+                if (!HeadingDrive_CaptureTarget()) {
+                    Param_Printf(source, "HD target update fail: IMU not ready\r\n");
+                } else {
+                    Param_Printf(source, "HD target update: target yaw=%d\r\n",
+                                 (int)HeadingDrive_GetTargetYaw());
+                }
+            } else {
+                const char *speed_arg = &line[1];
+                if (*speed_arg != '\0') {
+                    int16_t hd_speed = Clamp_Target((int16_t)atoi(speed_arg));
+                    if (hd_speed < 0) hd_speed = (int16_t)-hd_speed;
+                    HeadingDrive_SetBaseSpeed(hd_speed);
+                }
+                if (g_MagAutoCal) {
+                    CmdDispatch_CancelMagAutoCal(source);
+                }
+                if (LineFollow_IsEnabled()) {
+                    LineFollow_Stop();
+                }
+                Motor_OpenLoop_Stop();
+                if (!HeadingDrive_StartStraight()) {
+                    g_Run = 0U;
+                    Param_Printf(source, "HD start fail: send hi first\r\n");
+                } else {
+                    g_Run = 1U;
+                    g_Stream = 0U;
+                    g_StreamTarget = STREAM_TARGET_NONE;
+                    g_IrStream = 0U;
+                    g_IrStreamTarget = STREAM_TARGET_NONE;
+                    Param_Printf(source, "HD start: target yaw=%d base=%d\r\n",
+                                 (int)HeadingDrive_GetTargetYaw(),
+                                 (int)HeadingDrive_GetBaseSpeed());
+                }
+            }
+            break;
         case 'o':
             if (LineFollow_IsEnabled()) {
                 LineFollow_Stop();
@@ -293,7 +312,6 @@ static void Parse_TuneLine(char *line, uint8_t source)
             break;
         case 'u':
             LineFollow_SetBaseSpeed(value);
-            HeadingDrive_SetBaseSpeed(value);
             break;
         default:
             break;
@@ -402,9 +420,6 @@ static void CmdDispatch_StartMagAutoCal(uint8_t source)
     if (LineFollow_IsEnabled()) {
         LineFollow_Stop();
     }
-    if (HeadingDrive_IsEnabled()) {
-        HeadingDrive_Stop();
-    }
     Motor_OpenLoop_Stop();
 
     CmdDispatch_ResetMagCal();
@@ -417,8 +432,8 @@ static void CmdDispatch_StartMagAutoCal(uint8_t source)
     g_StreamTarget = STREAM_TARGET_NONE;
     g_IrStream = 0U;
     g_IrStreamTarget = STREAM_TARGET_NONE;
-    g_HeadingStream = 0U;
-    g_HeadingStreamTarget = STREAM_TARGET_NONE;
+    g_ImuStream = 0U;
+    g_ImuStreamTarget = STREAM_TARGET_NONE;
     g_MagCalStream = 0U;
     g_MagCalStreamTarget = STREAM_TARGET_NONE;
 
@@ -544,25 +559,29 @@ void CmdDispatch_PrintTracking(uint8_t target)
         (unsigned int)bits,
         (unsigned int)pattern);
 }
-void CmdDispatch_PrintHeading(uint8_t target)
+void CmdDispatch_PrintImu(uint8_t target)
 {
-    /* HD,enabled,state,cal,yaw,magYaw,target,error,diff,TL,TR,AL,AR,PL,PR,gz */
-    Param_Printf(target, "HD,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
-                 (unsigned int)HeadingDrive_IsEnabled(),
-                 (unsigned int)HeadingDrive_GetState(),
-                 (unsigned int)Heading_GetCalProgress(),
-                 (int)Heading_GetYawDeg(),
-                 (int)Heading_GetMagYawDeg(),
-                 (int)HeadingDrive_GetTargetYaw(),
-                 (int)HeadingDrive_GetErrorDeg(),
-                 (int)HeadingDrive_GetLastDiff(),
-                 (int)Motor_GetTarget_L(),
-                 (int)Motor_GetTarget_R(),
-                 (int)Motor_GetActual_L(),
-                 (int)Motor_GetActual_R(),
-                 (int)Motor_GetPwm_L(),
-                 (int)Motor_GetPwm_R(),
-                 (int)Heading_GetGyroZRaw());
+    IMUTest_Data imu;
+    bool ok = IMUTest_Read(&imu);
+
+    /* IMU,ok,ax,ay,az,gx,gy,gz,mx,my,mz,roll,pitch,yaw,mpuOk,magOk */
+    Param_Printf(target,
+                 "IMU,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u\r\n",
+                 ok ? 1U : 0U,
+                 (int)imu.AccelX,
+                 (int)imu.AccelY,
+                 (int)imu.AccelZ,
+                 (int)imu.GyroX,
+                 (int)imu.GyroY,
+                 (int)imu.GyroZ,
+                 (int)imu.MagX,
+                 (int)imu.MagY,
+                 (int)imu.MagZ,
+                 (int)imu.RollDeg,
+                 (int)imu.PitchDeg,
+                 (int)imu.YawDeg,
+                 (unsigned int)imu.MpuOk,
+                 (unsigned int)imu.MagOk);
 }
 #define LINE_BUF_SIZE 64U
 
@@ -591,7 +610,7 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
         Apply_Targets();
         Print_Params(source);
     } else if (ch == 'v' || ch == 'V') {
-        if (LineFollow_IsEnabled() || HeadingDrive_IsEnabled()) {
+        if (LineFollow_IsEnabled()) {
             g_Stream = 0U;
             g_StreamTarget = STREAM_TARGET_NONE;
         } else {
@@ -600,8 +619,8 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             if (g_Stream) {
                 g_IrStream = 0U;
                 g_IrStreamTarget = STREAM_TARGET_NONE;
-                g_HeadingStream = 0U;
-                g_HeadingStreamTarget = STREAM_TARGET_NONE;
+                g_ImuStream = 0U;
+                g_ImuStreamTarget = STREAM_TARGET_NONE;
             }
         }
         Print_Params(source);
@@ -622,9 +641,9 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             g_DisplayDirty = 1U;
         }
     } else if (ch == 'y') {
-        g_HeadingStream ^= 1U;
-        g_HeadingStreamTarget = g_HeadingStream ? source : STREAM_TARGET_NONE;
-        if (g_HeadingStream) {
+        g_ImuStream ^= 1U;
+        g_ImuStreamTarget = g_ImuStream ? source : STREAM_TARGET_NONE;
+        if (g_ImuStream) {
             g_Stream = 0U;
             g_StreamTarget = STREAM_TARGET_NONE;
             g_IrStream = 0U;
@@ -640,8 +659,8 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             g_StreamTarget = STREAM_TARGET_NONE;
             g_IrStream = 0U;
             g_IrStreamTarget = STREAM_TARGET_NONE;
-            g_HeadingStream = 0U;
-            g_HeadingStreamTarget = STREAM_TARGET_NONE;
+            g_ImuStream = 0U;
+            g_ImuStreamTarget = STREAM_TARGET_NONE;
         }
         Print_Params(source);
     } else if (ch == 'x') {
@@ -650,14 +669,14 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
         if (g_IrStream) {
             g_Stream = 0U;
             g_StreamTarget = STREAM_TARGET_NONE;
-            g_HeadingStream = 0U;
-            g_HeadingStreamTarget = STREAM_TARGET_NONE;
+            g_ImuStream = 0U;
+            g_ImuStreamTarget = STREAM_TARGET_NONE;
         }
         Print_Params(source);
     } else if (ch == 'X') {
         CmdDispatch_PrintTracking(source);
     } else if (ch == 'Y') {
-        (void)Heading_Update();
+        CmdDispatch_PrintImu(source);
         Print_Params(source);
     } else if (ch == 'f' || ch == 'F') {
         if (LineFollow_IsEnabled()) {
@@ -672,25 +691,8 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
             g_Run = 1U;
             g_Stream = 0U;
             g_StreamTarget = STREAM_TARGET_NONE;
-            g_HeadingStream = 0U;
-            g_HeadingStreamTarget = STREAM_TARGET_NONE;
-        }
-        Print_Params(source);
-    } else if (ch == 'h' || ch == 'H') {
-        if (HeadingDrive_IsEnabled()) {
-            HeadingDrive_Stop();
-            g_Run = 0U;
-        } else {
-            if (LineFollow_IsEnabled()) {
-                LineFollow_Stop();
-            }
-            Motor_OpenLoop_Stop();
-            HeadingDrive_Start();
-            g_Run = 1U;
-            g_Stream = 0U;
-            g_StreamTarget = STREAM_TARGET_NONE;
-            g_IrStream = 0U;
-            g_IrStreamTarget = STREAM_TARGET_NONE;
+            g_ImuStream = 0U;
+            g_ImuStreamTarget = STREAM_TARGET_NONE;
         }
         Print_Params(source);
     }

@@ -6,12 +6,19 @@
 #define HD_BASE_SPEED_DEFAULT 20
 #define HD_DIFF_LIMIT_DEFAULT 8
 #define HD_INTEGRAL_LIMIT     1000L
+/* D term reference sample period. hd_kd was tuned assuming an implicit
+   20ms tick; dividing the raw error delta by dt_sec directly would rescale
+   Kd by ~50x and require a full retune. Instead we scale by (ref/dt), which
+   reproduces today's behavior exactly at dt==20ms and only pulls the D term
+   down when a tick is skipped/delayed, instead of letting it swing wildly. */
+#define HD_DT_REF_SEC          (0.020f)
 
 static HeadingDrive_Data hd_data;
 static float hd_kp = 0.800f;
 static float hd_ki = 0.000f;
 static float hd_kd = 0.250f;
 static int16_t hd_last_error;
+static uint8_t hd_target_valid;
 
 static int16_t Clamp_Int16(int16_t value, int16_t min, int16_t max)
 {
@@ -30,6 +37,17 @@ static int32_t Clamp_Int32(int32_t value, int32_t min, int32_t max)
 static int16_t Round_Float_ToInt16(float value)
 {
     return (int16_t)((value >= 0.0f) ? (value + 0.5f) : (value - 0.5f));
+}
+
+static int16_t HeadingDrive_NormalizeYaw(int16_t yaw_deg)
+{
+    while (yaw_deg < 0) {
+        yaw_deg = (int16_t)(yaw_deg + 360);
+    }
+    while (yaw_deg >= 360) {
+        yaw_deg = (int16_t)(yaw_deg - 360);
+    }
+    return yaw_deg;
 }
 
 static void HeadingDrive_ResetController(void)
@@ -55,18 +73,54 @@ void HeadingDrive_Init(void)
     hd_data.current_yaw = 0;
     hd_data.diff_limit = HD_DIFF_LIMIT_DEFAULT;
     hd_data.output_sign = -1;
+    hd_target_valid = 0U;
     HeadingDrive_ResetController();
+}
+
+uint8_t HeadingDrive_CaptureTarget(void)
+{
+    Heading_StartCalibration();
+
+    /* hi command: lock the current IMU heading only. Do not enable motors. */
+    if ((!Heading_UpdateAndSnapYaw(HD_DT_REF_SEC)) || (!Heading_IsReady())) {
+        hd_target_valid = 0U;
+        hd_data.state = HD_STATE_SENSOR_FAIL;
+        return 0U;
+    }
+
+    hd_data.current_yaw = Heading_GetYawDeg();
+    hd_data.target_yaw = hd_data.current_yaw;
+    hd_target_valid = 1U;
+    if (!hd_data.enabled) {
+        hd_data.state = HD_STATE_IDLE;
+    }
+    HeadingDrive_ResetController();
+    return 1U;
+}
+
+void HeadingDrive_SetTargetYaw(int16_t yaw_deg)
+{
+    hd_data.target_yaw = HeadingDrive_NormalizeYaw(yaw_deg);
+    hd_target_valid = 1U;
+    HeadingDrive_ResetController();
+}
+
+uint8_t HeadingDrive_StartStraight(void)
+{
+    if (!hd_target_valid) {
+        return 0U;
+    }
+
+    hd_data.enabled = 1U;
+    hd_data.state = HD_STATE_RUN;
+    HeadingDrive_ResetController();
+    HeadingDrive_SetTargets(0, 0);
+    return 1U;
 }
 
 void HeadingDrive_Start(void)
 {
-    hd_data.enabled = 1U;
-    hd_data.state = HD_STATE_CALIBRATING;
-    hd_data.target_yaw = 0;
-    hd_data.current_yaw = 0;
-    HeadingDrive_ResetController();
-    Heading_StartCalibration();
-    HeadingDrive_SetTargets(0, 0);
+    (void)HeadingDrive_StartStraight();
 }
 
 void HeadingDrive_Stop(void)
@@ -85,6 +139,7 @@ void HeadingDrive_UpdateWithDt(float dt_sec)
     int16_t left;
     int16_t right;
     float output;
+    float dt_ratio;
 
     if (!hd_data.enabled) return;
 
@@ -113,10 +168,11 @@ void HeadingDrive_UpdateWithDt(float dt_sec)
                                    -HD_INTEGRAL_LIMIT,
                                    HD_INTEGRAL_LIMIT);
     delta = (int16_t)(error - hd_last_error);
+    dt_ratio = (dt_sec > 0.0f) ? (HD_DT_REF_SEC / dt_sec) : 1.0f;
 
     output = (hd_kp * (float)error) +
              (hd_ki * (float)hd_data.integral) +
-             (hd_kd * (float)delta);
+             (hd_kd * (float)delta * dt_ratio);
     diff = Round_Float_ToInt16(output);
     diff = Clamp_Int16(diff, (int16_t)-hd_data.diff_limit, hd_data.diff_limit);
     diff = (int16_t)(diff * hd_data.output_sign);
@@ -179,6 +235,7 @@ int16_t HeadingDrive_GetTargetYaw(void) { return hd_data.target_yaw; }
 int16_t HeadingDrive_GetCurrentYaw(void) { return hd_data.current_yaw; }
 int16_t HeadingDrive_GetErrorDeg(void) { return hd_data.error_deg; }
 int16_t HeadingDrive_GetLastDiff(void) { return hd_data.last_diff; }
+uint8_t HeadingDrive_HasTarget(void) { return hd_target_valid; }
 int32_t HeadingDrive_GetIntegral(void) { return hd_data.integral; }
 
 const HeadingDrive_Data *HeadingDrive_GetData(void)

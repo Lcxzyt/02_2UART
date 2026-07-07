@@ -10,7 +10,7 @@
 void CmdDispatch_Process(void);
 void CmdDispatch_ApplyTargets(void);
 void CmdDispatch_PrintTracking(uint8_t target);
-void CmdDispatch_PrintHeading(uint8_t target);
+void CmdDispatch_PrintImu(uint8_t target);
 void CmdDispatch_PrintMagCal(uint8_t target);
 void CmdDispatch_UpdateMagAutoCal(void);
 
@@ -26,8 +26,8 @@ extern volatile uint8_t g_Stream;
 extern volatile uint8_t g_StreamTarget;
 extern volatile uint8_t g_IrStream;
 extern volatile uint8_t g_IrStreamTarget;
-extern volatile uint8_t g_HeadingStream;
-extern volatile uint8_t g_HeadingStreamTarget;
+extern volatile uint8_t g_ImuStream;
+extern volatile uint8_t g_ImuStreamTarget;
 extern volatile uint8_t g_MagCalStream;
 extern volatile uint8_t g_MagCalStreamTarget;
 extern volatile uint8_t g_MagAutoCal;

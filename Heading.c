@@ -1,17 +1,27 @@
 #include "Heading.h"
 #include "IMU.h"
-#include "MPU6050.h"
-#include "QMC5883L.h"
 
 #define HEADING_SAMPLE_PERIOD_SEC (0.02f)
 #define HEADING_DT_MIN_SEC        (0.001f)
 #define HEADING_DT_MAX_SEC        (0.200f)
-#define GYRO_SCALE                (1.0f / 16.4f)
-#define ACCEL_SCALE               (9.80665f / 16384.0f)
-#define MAG_SCALE                 (100.0f / 3000.0f)
+/* Glitch guard: reject/limit single-sample yaw jumps faster than this rate.
+   Real intentional turns measured so far (~10 deg/s hand turn, in-place
+   mag-cal spin) are far below this; corrupted I2C reads during driving
+   produced jumps equivalent to several hundred deg/s, so 250 deg/s is a
+   safe ceiling that still lets genuine fast rotation through gradually. */
+#define HEADING_YAW_MAX_RATE_DEG_PER_SEC (250.0f)
+/* Light low-pass on top of the rate guard above. The rate guard only stops
+   single-frame spikes; everyday magnetometer/vibration noise that stays
+   under that ceiling was still being applied to yaw_deg 1:1, which showed
+   up as the fused heading wandering a few degrees in no fixed direction
+   while actually driving (confirmed non-directional, so this is noise, not
+   a real mechanical bias). Blending in only a fraction of each new sample
+   damps that noise while still tracking real turns within a few ticks. */
+#define HEADING_YAW_SMOOTH_ALPHA (0.30f)
 
 static Heading_Data heading_data = {0};
 static uint8_t heading_initialized = 0U;
+static uint8_t heading_yaw_seeded = 0U;
 static IMU_Kalman1D heading_kf_roll;
 static IMU_Kalman1D heading_kf_pitch;
 static IMU_Attitude heading_attitude;
@@ -63,26 +73,6 @@ static void Heading_SetState(uint8_t state, uint8_t ready)
     heading_data.ready = ready;
 }
 
-static void Heading_RawToScaled(const IMU_RawData *raw, IMU_ScaledData *sc)
-{
-    float ox = 0.0f;
-    float oy = 0.0f;
-    float oz = 0.0f;
-
-    IMU_GetMagOffsets(&ox, &oy, &oz);
-
-    sc->AccelX = (float)raw->AccelX * ACCEL_SCALE;
-    sc->AccelY = (float)raw->AccelY * ACCEL_SCALE;
-    sc->AccelZ = (float)raw->AccelZ * ACCEL_SCALE;
-    sc->GyroX = (float)raw->GyroX * GYRO_SCALE;
-    sc->GyroY = (float)raw->GyroY * GYRO_SCALE;
-    sc->GyroZ = (float)raw->GyroZ * GYRO_SCALE;
-    sc->MagX = ((float)raw->MagX * MAG_SCALE) - ox;
-    sc->MagY = ((float)raw->MagY * MAG_SCALE) - oy;
-    sc->MagZ = ((float)raw->MagZ * MAG_SCALE) - oz;
-    sc->Temperature = ((float)raw->TempRaw / 340.0f) + 36.53f;
-}
-
 static void Heading_ResetFilters(void)
 {
     IMU_KalmanInit(&heading_kf_roll, 0.001f, 0.003f, 0.03f);
@@ -106,6 +96,7 @@ bool Heading_Init(void)
     heading_data.cal_progress = 0U;
     heading_data.mpu_ok = 0U;
     heading_data.mag_ok = 0U;
+    heading_yaw_seeded = 0U;
     Heading_SetState(HEADING_STATE_IDLE, 0U);
 
     Heading_ResetFilters();
@@ -130,8 +121,16 @@ void Heading_StartCalibration(void)
     }
 
     /* STM32 reference path has no gyro-Z bias calibration for yaw.
-       Keep the public command compatible, but finish immediately. */
-    Heading_ResetFilters();
+       Keep the public command compatible, but finish immediately.
+       Do NOT reset the roll/pitch Kalman filters here: this function runs
+       every time HeadingDrive_Start() fires (i.e. every single 'h' press),
+       right as the motors kick on. Wiping an already-converged filter at
+       that exact moment forced roll/pitch to reconverge from zero during
+       the startup vibration window, which showed up as a large spurious
+       yaw excursion (measured even with wheels lifted off the ground, so
+       it was never a real chassis rotation). Reuse whatever roll/pitch
+       state already exists; it only starts from zero once, in
+       Heading_Init(), which runs at boot / after a real sensor failure. */
     heading_data.gyro_z_bias = 0;
     heading_data.cal_progress = 100U;
 
@@ -145,8 +144,6 @@ void Heading_StartCalibration(void)
 bool Heading_UpdateWithDt(float dt_sec)
 {
     IMU_ScaledData sc;
-    uint8_t mpu_ok = 0U;
-    uint8_t mag_ok = 0U;
 
     if (dt_sec < HEADING_DT_MIN_SEC) {
         dt_sec = HEADING_SAMPLE_PERIOD_SEC;
@@ -160,22 +157,46 @@ bool Heading_UpdateWithDt(float dt_sec)
         }
     }
 
-    (void)IMU_ReadRawStatus(&heading_raw, &mpu_ok, &mag_ok);
-    heading_data.mpu_ok = mpu_ok;
-    heading_data.mag_ok = mag_ok;
+    IMU_ReadRaw(&heading_raw);
+    IMU_ReadScaled(&sc);
+    heading_data.mpu_ok = heading_initialized;
+    heading_data.mag_ok = heading_initialized;
     heading_data.gyro_z_raw = heading_raw.GyroZ;
     heading_data.gyro_z_bias = 0;
 
-    if ((!mpu_ok) || (!mag_ok)) {
+    if (!heading_initialized) {
         Heading_SetState(HEADING_STATE_SENSOR_FAIL, 0U);
         return false;
     }
 
-    Heading_RawToScaled(&heading_raw, &sc);
     IMU_GetAttitudeKF(&heading_kf_roll, &heading_kf_pitch, &sc, &heading_attitude, dt_sec);
 
     heading_data.mag_yaw_deg = Heading_RoundNormalize(heading_attitude.Yaw);
-    heading_data.yaw_deg = heading_data.mag_yaw_deg;
+
+    /* mag_yaw_deg above stays the raw, unfiltered tilt-compensated compass
+       reading (kept for diagnostics / HMag). yaw_deg is what the controller
+       actually uses, and gets a simple max-rate guard so a single corrupted
+       I2C sample (motor EMI / vibration during driving) can't shove the fused
+       heading tens of degrees in one 20ms tick. First sample after
+       Heading_Init() is seeded directly since there is no prior value yet. */
+    if (!heading_yaw_seeded) {
+        heading_data.yaw_deg = heading_data.mag_yaw_deg;
+        heading_yaw_seeded = 1U;
+    } else {
+        float max_step = HEADING_YAW_MAX_RATE_DEG_PER_SEC * dt_sec;
+        float step = Heading_AngleDiffFloat((float)heading_data.mag_yaw_deg,
+                                             (float)heading_data.yaw_deg);
+
+        if (step > max_step) {
+            step = max_step;
+        } else if (step < -max_step) {
+            step = -max_step;
+        }
+
+        heading_data.yaw_deg = Heading_RoundNormalize((float)heading_data.yaw_deg
+                                                       + (HEADING_YAW_SMOOTH_ALPHA * step));
+    }
+
     if (heading_data.cal_progress == 0U) {
         heading_data.cal_progress = 100U;
     }
@@ -187,6 +208,22 @@ bool Heading_UpdateWithDt(float dt_sec)
 bool Heading_Update(void)
 {
     return Heading_UpdateWithDt(HEADING_SAMPLE_PERIOD_SEC);
+}
+
+bool Heading_UpdateAndSnapYaw(float dt_sec)
+{
+    if (!Heading_UpdateWithDt(dt_sec)) {
+        return false;
+    }
+
+    /* hi means: use the car's heading at THIS moment as the new reference.
+       Bypass the normal yaw rate guard / smoothing here; otherwise a stale
+       filtered yaw only moves a few degrees per command and hi cannot really
+       re-zero the straight-driving target. */
+    heading_data.yaw_deg = heading_data.mag_yaw_deg;
+    heading_yaw_seeded = 1U;
+    Heading_SetState(HEADING_STATE_READY, 1U);
+    return true;
 }
 
 uint8_t Heading_IsReady(void) { return heading_data.ready; }
