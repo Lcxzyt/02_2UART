@@ -5,6 +5,8 @@
 #include "IMUTest.h"
 #include "LineFollow.h"
 #include "HeadingDrive.h"
+#include "TaskController.h"
+#include "StreamOutput.h"
 #include "Serial.h"
 #include "Tracking.h"
 #include "Timer.h"
@@ -195,7 +197,8 @@ static uint8_t Is_LineCmd(uint8_t c)
             c == 'q' || c == 'Q' || c == 'w' || c == 'W' ||
             c == 'e' || c == 'E' ||
             c == 'h' || c == 'H' ||
-            c == 'o' || c == 'O');
+            c == 'o' || c == 'O' ||
+            c == 'a' || c == 'A');
 }
 
 static void Parse_TuneLine(char *line, uint8_t source)
@@ -205,6 +208,12 @@ static void Parse_TuneLine(char *line, uint8_t source)
     int16_t value;
     char c = line[0];
     if (c >= 'A' && c <= 'Z') c += 32;
+
+    /* 自动模式运行中：拒绝会冲突的手动命令 */
+    if (TaskController_IsRunning() && c != 'a') {
+        Param_Printf(source, "BUSY: TaskController running, send A0 to stop\r\n");
+        return;
+    }
 
     Motor_PID_GetTunings(&kp, &ki, &kd);
     LineFollow_GetTunings(&lkp, &lki, &lkd);
@@ -312,6 +321,15 @@ static void Parse_TuneLine(char *line, uint8_t source)
             break;
         case 'u':
             LineFollow_SetBaseSpeed(value);
+            break;
+        case 'a':
+            /* A0 = IDLE, A1 = AutoTrack */
+            if (value >= 0 && value <= 1) {
+                TaskController_Start((TaskMode)value);
+                Param_Printf(source, "Mode=%d %s\r\n",
+                             (int)value,
+                             (value == 0) ? "IDLE" : "AUTO_TRACK");
+            }
             break;
         default:
             break;
@@ -592,6 +610,13 @@ static uint8_t tune_source = STREAM_TARGET_NONE;
 
 static void Dispatch_Immediate(uint8_t ch, uint8_t source)
 {
+    /* 自动模式运行中：拒绝开关类命令 (0/1/f)，允许状态流命令 */
+    if (TaskController_IsRunning() &&
+        (ch == '0' || ch == '1' || ch == 's' || ch == 'S' ||
+         ch == 'f' || ch == 'F')) {
+        Param_Printf(source, "BUSY: TaskController running, send A0 first\r\n");
+        return;
+    }
     if (ch == '0' || ch == 's' || ch == 'S') {
         if (g_MagAutoCal) {
             CmdDispatch_CancelMagAutoCal(source);
@@ -745,6 +770,68 @@ void CmdDispatch_Process(void)
     count = 24U;
     while (count-- && !Bluetooth_RingBuf_IsEmpty()) {
         Dispatch_Byte(Bluetooth_RingBuf_Get(), STREAM_TARGET_BLUETOOTH);
+    }
+}
+
+/* ── 流节拍打印节拍 ── */
+#define CMD_IR_STREAM_TICKS      10U
+#define CMD_IMU_STREAM_TICKS      5U
+#define CMD_MAG_CAL_STREAM_TICKS  5U
+#define CMD_SPEED_STREAM_TICKS    5U
+
+void CmdDispatch_UpdateStreams(void)
+{
+    static uint8_t ir_stream_tick      = 0U;
+    static uint8_t imu_stream_tick     = 0U;
+    static uint8_t mag_cal_stream_tick = 0U;
+    static uint8_t speed_stream_tick   = 0U;
+
+    /* IR 流: 每 200ms */
+    if (g_IrStream) {
+        ir_stream_tick++;
+        if (ir_stream_tick >= CMD_IR_STREAM_TICKS) {
+            ir_stream_tick = 0U;
+            CmdDispatch_PrintTracking(g_IrStreamTarget);
+        }
+    } else {
+        ir_stream_tick = 0U;
+    }
+
+    /* IMU 流: 每 100ms */
+    if (g_ImuStream) {
+        imu_stream_tick++;
+        if (imu_stream_tick >= CMD_IMU_STREAM_TICKS) {
+            imu_stream_tick = 0U;
+            CmdDispatch_PrintImu(g_ImuStreamTarget);
+        }
+    } else {
+        imu_stream_tick = 0U;
+    }
+
+    /* 磁力计校准流: 每 100ms */
+    if (g_MagCalStream) {
+        mag_cal_stream_tick++;
+        if (mag_cal_stream_tick >= CMD_MAG_CAL_STREAM_TICKS) {
+            mag_cal_stream_tick = 0U;
+            CmdDispatch_PrintMagCal(g_MagCalStreamTarget);
+        }
+    } else {
+        mag_cal_stream_tick = 0U;
+    }
+
+    /* VOFA 速度流: 每 100ms (排除巡线和 IMU 模式) */
+    if (g_Stream && (!LineFollow_IsEnabled())) {
+        if (g_DisplayMode == 1U) {
+            StreamOutput_PrintImu();
+        } else {
+            speed_stream_tick++;
+            if (speed_stream_tick >= CMD_SPEED_STREAM_TICKS) {
+                speed_stream_tick = 0U;
+                StreamOutput_PrintVofa();
+            }
+        }
+    } else {
+        speed_stream_tick = 0U;
     }
 }
 

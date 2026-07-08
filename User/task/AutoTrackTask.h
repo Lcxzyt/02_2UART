@@ -11,6 +11,9 @@
 #define AUTO_TRACK_STATE_FOLLOW_DA   5U
 #define AUTO_TRACK_STATE_FINISHED    6U
 #define AUTO_TRACK_STATE_ERROR       7U
+#define AUTO_TRACK_STATE_PAUSED_B    8U
+#define AUTO_TRACK_STATE_PAUSED_C    9U
+#define AUTO_TRACK_STATE_PAUSED_D   10U
 
 #define AUTO_TRACK_ERROR_NONE        0U
 #define AUTO_TRACK_ERROR_HEADING     1U
@@ -23,10 +26,15 @@ void AutoTrackTask_Start(void);
 void AutoTrackTask_Stop(void);
 void AutoTrackTask_Update(float dt_sec);
 
+/* 检查点暂停/恢复（供 TaskController 编排用） */
+void AutoTrackTask_SetCheckpointMode(uint8_t enable);
+void AutoTrackTask_Resume(void);
+
 uint8_t AutoTrackTask_IsActive(void);
 uint8_t AutoTrackTask_IsRunning(void);
 uint8_t AutoTrackTask_GetState(void);
 uint8_t AutoTrackTask_GetError(void);
+const char* AutoTrackTask_GetStateText(void);
 uint8_t AutoTrackTask_GetLineBits(void);
 uint8_t AutoTrackTask_GetBlackCount(void);
 uint8_t AutoTrackTask_GetWhiteCount(void);

@@ -9,6 +9,7 @@
 
 void CmdDispatch_Process(void);
 void CmdDispatch_ApplyTargets(void);
+void CmdDispatch_UpdateStreams(void);
 void CmdDispatch_PrintTracking(uint8_t target);
 void CmdDispatch_PrintImu(uint8_t target);
 void CmdDispatch_PrintMagCal(uint8_t target);

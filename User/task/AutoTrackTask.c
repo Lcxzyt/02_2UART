@@ -39,6 +39,8 @@ static uint16_t auto_segment_ticks;
 static uint16_t auto_total_ticks;
 static uint16_t auto_alert_ticks;
 static uint16_t auto_endpoint_alert_ticks;
+static uint8_t  auto_checkpoint_mode;
+static uint8_t  auto_paused_next_state;  /* 暂停前保存即将进入的状态 */
 
 static int16_t AutoTrackTask_NormalizeYaw(int16_t yaw_deg)
 {
@@ -280,8 +282,15 @@ static void AutoTrackTask_UpdateStraightAB(float dt_sec)
     }
 
     if (AutoTrackTask_ConfirmBlack(AUTO_BLACK_CONFIRM_TICKS)) {
-        AutoTrackTask_StartEndpointAlert();
-        AutoTrackTask_StartFollow(AUTO_TRACK_STATE_FOLLOW_BC);
+        if (auto_checkpoint_mode) {
+            /* 暂停在 B 点等待 TaskController 调度 */
+            AutoTrackTask_StopMotion();
+            auto_paused_next_state = AUTO_TRACK_STATE_FOLLOW_BC;
+            auto_state = AUTO_TRACK_STATE_PAUSED_B;
+        } else {
+            AutoTrackTask_StartEndpointAlert();
+            AutoTrackTask_StartFollow(AUTO_TRACK_STATE_FOLLOW_BC);
+        }
         return;
     }
 
@@ -303,8 +312,14 @@ static void AutoTrackTask_UpdateStraightCD(float dt_sec)
     }
 
     if (AutoTrackTask_ConfirmBlack(AUTO_BLACK_CONFIRM_TICKS)) {
-        AutoTrackTask_StartEndpointAlert();
-        AutoTrackTask_StartFollow(AUTO_TRACK_STATE_FOLLOW_DA);
+        if (auto_checkpoint_mode) {
+            AutoTrackTask_StopMotion();
+            auto_paused_next_state = AUTO_TRACK_STATE_FOLLOW_DA;
+            auto_state = AUTO_TRACK_STATE_PAUSED_D;
+        } else {
+            AutoTrackTask_StartEndpointAlert();
+            AutoTrackTask_StartFollow(AUTO_TRACK_STATE_FOLLOW_DA);
+        }
         return;
     }
 
@@ -334,8 +349,15 @@ static void AutoTrackTask_UpdateFollow(uint8_t is_last_arc, float dt_sec)
         if (is_last_arc) {
             AutoTrackTask_EnterFinished();
         } else {
-            AutoTrackTask_StartEndpointAlert();
-            AutoTrackTask_EnterStraightCD();
+            if (auto_checkpoint_mode) {
+                /* 暂停在 C 点等待 TaskController 调度 */
+                AutoTrackTask_StopMotion();
+                auto_paused_next_state = AUTO_TRACK_STATE_STRAIGHT_CD;
+                auto_state = AUTO_TRACK_STATE_PAUSED_C;
+            } else {
+                AutoTrackTask_StartEndpointAlert();
+                AutoTrackTask_EnterStraightCD();
+            }
         }
         return;
     }
@@ -361,6 +383,8 @@ void AutoTrackTask_Init(void)
     auto_total_ticks = 0U;
     auto_alert_ticks = 0U;
     auto_endpoint_alert_ticks = AUTO_ENDPOINT_ALERT_TICKS;
+    auto_checkpoint_mode = 0U;
+    auto_paused_next_state = 0U;
     AutoTrackTask_ResetSegment();
 }
 
@@ -399,17 +423,67 @@ void AutoTrackTask_Stop(void)
     AutoTrackTask_ResetSegment();
 }
 
+void AutoTrackTask_SetCheckpointMode(uint8_t enable)
+{
+    auto_checkpoint_mode = (enable != 0U) ? 1U : 0U;
+}
+
+void AutoTrackTask_Resume(void)
+{
+    if (!auto_active) return;
+
+    /* 只从暂停状态恢复 */
+    switch (auto_state) {
+        case AUTO_TRACK_STATE_PAUSED_B:
+            AutoTrackTask_SetState(auto_paused_next_state);
+            break;
+        case AUTO_TRACK_STATE_PAUSED_C:
+            AutoTrackTask_SetState(auto_paused_next_state);
+            break;
+        case AUTO_TRACK_STATE_PAUSED_D:
+            AutoTrackTask_SetState(auto_paused_next_state);
+            break;
+        default:
+            break;
+    }
+}
+
+const char* AutoTrackTask_GetStateText(void)
+{
+    switch (auto_state) {
+        case AUTO_TRACK_STATE_IDLE:        return "ST:IDLE         ";
+        case AUTO_TRACK_STATE_PRECHECK:    return "ST:CHECK A WHITE";
+        case AUTO_TRACK_STATE_STRAIGHT_AB: return "ST:STRAIGHT A-B ";
+        case AUTO_TRACK_STATE_FOLLOW_BC:   return "ST:FOLLOW B-C   ";
+        case AUTO_TRACK_STATE_STRAIGHT_CD: return "ST:STRAIGHT C-D ";
+        case AUTO_TRACK_STATE_FOLLOW_DA:   return "ST:FOLLOW D-A   ";
+        case AUTO_TRACK_STATE_FINISHED:    return "ST:DONE         ";
+        case AUTO_TRACK_STATE_PAUSED_B:    return "ST:PAUSED AT B  ";
+        case AUTO_TRACK_STATE_PAUSED_C:    return "ST:PAUSED AT C  ";
+        case AUTO_TRACK_STATE_PAUSED_D:    return "ST:PAUSED AT D  ";
+        case AUTO_TRACK_STATE_ERROR:
+            switch (auto_error) {
+                case AUTO_TRACK_ERROR_HEADING:   return "ERR:HEADING     ";
+                case AUTO_TRACK_ERROR_SENSOR:    return "ERR:IR SENSOR   ";
+                case AUTO_TRACK_ERROR_NOT_WHITE: return "ERR:A NOT WHITE ";
+                case AUTO_TRACK_ERROR_TIMEOUT:   return "ERR:TIMEOUT     ";
+                default:                         return "ERR:UNKNOWN     ";
+            }
+        default: return "ST:UNKNOWN      ";
+    }
+}
+
 void AutoTrackTask_Update(float dt_sec)
 {
     if (!auto_active) return;
 
-    if ((auto_state != AUTO_TRACK_STATE_FINISHED) &&
-        (auto_state != AUTO_TRACK_STATE_ERROR)) {
+    if ((auto_state <= AUTO_TRACK_STATE_FOLLOW_DA) &&
+        (auto_state != AUTO_TRACK_STATE_IDLE)) {
         AutoTrackTask_UpdateEndpointAlert();
     }
 
-    if ((auto_state != AUTO_TRACK_STATE_FINISHED) &&
-        (auto_state != AUTO_TRACK_STATE_ERROR)) {
+    if ((auto_state <= AUTO_TRACK_STATE_FOLLOW_DA) &&
+        (auto_state != AUTO_TRACK_STATE_IDLE)) {
         auto_total_ticks++;
         auto_segment_ticks++;
     }
@@ -433,6 +507,11 @@ void AutoTrackTask_Update(float dt_sec)
         case AUTO_TRACK_STATE_FINISHED:
         case AUTO_TRACK_STATE_ERROR:
             AutoTrackTask_UpdateAlert();
+            break;
+        case AUTO_TRACK_STATE_PAUSED_B:
+        case AUTO_TRACK_STATE_PAUSED_C:
+        case AUTO_TRACK_STATE_PAUSED_D:
+            /* 暂停中，等待 TaskController 调 Resume() */
             break;
         default:
             auto_active = 0U;
