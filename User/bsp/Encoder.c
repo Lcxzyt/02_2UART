@@ -19,6 +19,8 @@
 
 static volatile int32_t enc_count_l = 0;
 static volatile int32_t enc_count_r = 0;
+static volatile int32_t enc_total_l = 0;
+static volatile int32_t enc_total_r = 0;
 static uint8_t enc_state_l = 0;
 static uint8_t enc_state_r = 0;
 
@@ -67,6 +69,8 @@ void Encoder_Init(void)
 
     enc_count_l = 0;
     enc_count_r = 0;
+    enc_total_l = 0;
+    enc_total_r = 0;
     enc_state_l = Encoder_ReadState(ENC_L_A_PIN, ENC_L_B_PIN);
     enc_state_r = Encoder_ReadState(ENC_R_A_PIN, ENC_R_B_PIN);
 
@@ -117,7 +121,7 @@ int32_t Encoder_GetTotal_L(void)
     int32_t temp;
 
     __disable_irq();
-    temp = enc_count_l;
+    temp = enc_total_l;
     __enable_irq();
     return temp * ENCODER_SIGN_L;
 }
@@ -127,7 +131,7 @@ int32_t Encoder_GetTotal_R(void)
     int32_t temp;
 
     __disable_irq();
-    temp = enc_count_r;
+    temp = enc_total_r;
     __enable_irq();
     return temp * ENCODER_SIGN_R;
 }
@@ -150,13 +154,17 @@ void GROUP1_IRQHandler(void)
 
     if ((status & (ENC_L_A_PIN | ENC_L_B_PIN)) != 0U) {
         uint8_t state = Encoder_ReadState(ENC_L_A_PIN, ENC_L_B_PIN);
-        enc_count_l += Encoder_DecodeStep(enc_state_l, state);
+        int8_t step = Encoder_DecodeStep(enc_state_l, state);
+        enc_count_l += step;
+        enc_total_l += step;
         enc_state_l = state;
     }
 
     if ((status & (ENC_R_A_PIN | ENC_R_B_PIN)) != 0U) {
         uint8_t state = Encoder_ReadState(ENC_R_A_PIN, ENC_R_B_PIN);
-        enc_count_r += Encoder_DecodeStep(enc_state_r, state);
+        int8_t step = Encoder_DecodeStep(enc_state_r, state);
+        enc_count_r += step;
+        enc_total_r += step;
         enc_state_r = state;
     }
 

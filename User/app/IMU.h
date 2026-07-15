@@ -117,10 +117,10 @@ void IMU_GetInfo(char *buf, uint16_t len);
 /* —————— 数据采集 —————— */
 
 /** 读取所有传感器原始 ADC 值 */
-void IMU_ReadRaw(IMU_RawData *raw);
+uint8_t IMU_ReadRaw(IMU_RawData *raw);
 
 /** 读取并转换为物理量 */
-void IMU_ReadScaled(IMU_ScaledData *sc);
+uint8_t IMU_ReadScaled(IMU_ScaledData *sc);
 
 /* —————— 角度解算（无滤波） —————— */
 

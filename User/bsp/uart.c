@@ -4,11 +4,48 @@
 #include <stdio.h>
 
 #define SERIAL_RING_SIZE 256U
+#define SERIAL_TX_RING_SIZE 512U
 #define SERIAL_PRINTF_BUF_SIZE 256U
 
 static volatile uint8_t serial_ring[SERIAL_RING_SIZE];
 static volatile uint16_t serial_ring_head = 0U;
 static volatile uint16_t serial_ring_tail = 0U;
+static volatile uint8_t serial_tx_ring[SERIAL_TX_RING_SIZE];
+static volatile uint16_t serial_tx_head;
+static volatile uint16_t serial_tx_tail;
+static char serial_printf_buffer[SERIAL_PRINTF_BUF_SIZE];
+
+static void Serial_TxDrain(void)
+{
+    while ((serial_tx_tail != serial_tx_head) &&
+           (!DL_UART_Main_isTXFIFOFull(UART_0_INST))) {
+        DL_UART_Main_transmitData(UART_0_INST, serial_tx_ring[serial_tx_tail]);
+        serial_tx_tail++;
+        if (serial_tx_tail >= SERIAL_TX_RING_SIZE) serial_tx_tail = 0U;
+    }
+
+    if (serial_tx_tail == serial_tx_head) {
+        DL_UART_Main_disableInterrupt(UART_0_INST, DL_UART_MAIN_INTERRUPT_TX);
+    } else {
+        DL_UART_enableInterrupt(UART_0_INST, DL_UART_MAIN_INTERRUPT_TX);
+    }
+}
+
+static void Serial_TxKick(void)
+{
+    NVIC_DisableIRQ(UART_0_INST_INT_IRQN);
+    Serial_TxDrain();
+    NVIC_EnableIRQ(UART_0_INST_INT_IRQN);
+}
+
+static void Serial_TxPut(uint8_t byte)
+{
+    uint16_t next = (uint16_t)(serial_tx_head + 1U);
+    if (next >= SERIAL_TX_RING_SIZE) next = 0U;
+    if (next == serial_tx_tail) return;
+    serial_tx_ring[serial_tx_head] = byte;
+    serial_tx_head = next;
+}
 
 void Serial_RingBuf_Put(uint8_t ch)
 {
@@ -36,6 +73,8 @@ uint8_t Serial_RingBuf_IsEmpty(void)
 
 void Serial_Init(void)
 {
+    serial_tx_head = 0U;
+    serial_tx_tail = 0U;
     DL_UART_enableInterrupt(UART_0_INST, DL_UART_MAIN_INTERRUPT_RX);
     NVIC_ClearPendingIRQ(UART_0_INST_INT_IRQN);
     NVIC_EnableIRQ(UART_0_INST_INT_IRQN);
@@ -43,23 +82,26 @@ void Serial_Init(void)
 
 void Serial_SendByte(uint8_t Byte)
 {
-    DL_UART_Main_transmitDataBlocking(UART_0_INST, Byte);
+    Serial_TxPut(Byte);
+    Serial_TxKick();
 }
 
 void Serial_SendArray(uint8_t *Array, uint16_t Length)
 {
     uint16_t i;
     for (i = 0U; i < Length; i++) {
-        Serial_SendByte(Array[i]);
+        Serial_TxPut(Array[i]);
     }
+    Serial_TxKick();
 }
 
 void Serial_SendString(char *String)
 {
     while (*String != '\0') {
-        Serial_SendByte((uint8_t) *String);
+        Serial_TxPut((uint8_t)*String);
         String++;
     }
+    Serial_TxKick();
 }
 
 uint32_t Serial_Pow(uint32_t X, uint32_t Y)
@@ -88,14 +130,13 @@ int fputc(int ch, FILE *f)
 
 void Serial_Printf(char *format, ...)
 {
-    char String[SERIAL_PRINTF_BUF_SIZE];
     va_list arg;
 
     va_start(arg, format);
-    (void) vsnprintf(String, sizeof(String), format, arg);
+    (void) vsnprintf(serial_printf_buffer, sizeof(serial_printf_buffer), format, arg);
     va_end(arg);
 
-    Serial_SendString(String);
+    Serial_SendString(serial_printf_buffer);
 }
 
 void Serial_PrintFloat(float val, uint8_t intDig, uint8_t fracDig)
@@ -158,6 +199,9 @@ void UART_0_INST_IRQHandler(void)
             while (DL_UART_Main_isRXFIFOEmpty(UART_0_INST) == false) {
                 Serial_RingBuf_Put(DL_UART_Main_receiveData(UART_0_INST));
             }
+            break;
+        case DL_UART_MAIN_IIDX_TX:
+            Serial_TxDrain();
             break;
         default:
             break;

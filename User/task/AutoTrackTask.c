@@ -72,10 +72,17 @@ static void AutoTrackTask_StartEndpointAlert(void)
     BoardIO_LedSet(1U);
 }
 
-static void AutoTrackTask_UpdateEndpointAlert(void)
+static uint16_t AutoTrackTask_AddTicks(uint16_t value, uint16_t ticks)
+{
+    if (value > (uint16_t)(65535U - ticks)) return 65535U;
+    return (uint16_t)(value + ticks);
+}
+
+static void AutoTrackTask_UpdateEndpointAlert(uint16_t elapsed_ticks)
 {
     if (auto_endpoint_alert_ticks < AUTO_ENDPOINT_ALERT_TICKS) {
-        auto_endpoint_alert_ticks++;
+        auto_endpoint_alert_ticks = AutoTrackTask_AddTicks(auto_endpoint_alert_ticks,
+                                                            elapsed_ticks);
         if (auto_endpoint_alert_ticks >= AUTO_ENDPOINT_ALERT_TICKS) {
             BoardIO_BuzzerSet(0U);
             BoardIO_LedSet(0U);
@@ -239,10 +246,10 @@ static void AutoTrackTask_EnterStraightCD(void)
     }
 }
 
-static void AutoTrackTask_UpdateAlert(void)
+static void AutoTrackTask_UpdateAlert(uint16_t elapsed_ticks)
 {
     if (auto_alert_ticks < AUTO_ALERT_TICKS) {
-        auto_alert_ticks++;
+        auto_alert_ticks = AutoTrackTask_AddTicks(auto_alert_ticks, elapsed_ticks);
         if (auto_alert_ticks >= AUTO_ALERT_TICKS) {
             BoardIO_BuzzerSet(0U);
             BoardIO_LedSet(0U);
@@ -295,6 +302,10 @@ static void AutoTrackTask_UpdateStraightAB(float dt_sec)
     }
 
     HeadingDrive_UpdateWithDt(dt_sec);
+    if (HeadingDrive_GetState() == HD_STATE_SENSOR_FAIL) {
+        AutoTrackTask_EnterError(AUTO_TRACK_ERROR_HEADING);
+        return;
+    }
 
     if (auto_segment_ticks >= AUTO_STRAIGHT_TIMEOUT_TICKS) {
         AutoTrackTask_EnterError(AUTO_TRACK_ERROR_TIMEOUT);
@@ -324,6 +335,10 @@ static void AutoTrackTask_UpdateStraightCD(float dt_sec)
     }
 
     HeadingDrive_UpdateWithDt(dt_sec);
+    if (HeadingDrive_GetState() == HD_STATE_SENSOR_FAIL) {
+        AutoTrackTask_EnterError(AUTO_TRACK_ERROR_HEADING);
+        return;
+    }
 
     if (auto_segment_ticks >= AUTO_STRAIGHT_TIMEOUT_TICKS) {
         AutoTrackTask_EnterError(AUTO_TRACK_ERROR_TIMEOUT);
@@ -435,13 +450,18 @@ void AutoTrackTask_Resume(void)
     /* 只从暂停状态恢复 */
     switch (auto_state) {
         case AUTO_TRACK_STATE_PAUSED_B:
-            AutoTrackTask_SetState(auto_paused_next_state);
+            AutoTrackTask_StartEndpointAlert();
+            AutoTrackTask_StartFollow(auto_paused_next_state);
             break;
         case AUTO_TRACK_STATE_PAUSED_C:
-            AutoTrackTask_SetState(auto_paused_next_state);
+            AutoTrackTask_StartEndpointAlert();
+            if (auto_paused_next_state == AUTO_TRACK_STATE_STRAIGHT_CD) {
+                AutoTrackTask_EnterStraightCD();
+            }
             break;
         case AUTO_TRACK_STATE_PAUSED_D:
-            AutoTrackTask_SetState(auto_paused_next_state);
+            AutoTrackTask_StartEndpointAlert();
+            AutoTrackTask_StartFollow(auto_paused_next_state);
             break;
         default:
             break;
@@ -475,17 +495,23 @@ const char* AutoTrackTask_GetStateText(void)
 
 void AutoTrackTask_Update(float dt_sec)
 {
+    uint16_t elapsed_ticks;
+
     if (!auto_active) return;
+
+    elapsed_ticks = (uint16_t)((dt_sec / 0.020f) + 0.5f);
+    if (elapsed_ticks == 0U) elapsed_ticks = 1U;
+    if (elapsed_ticks > 10U) elapsed_ticks = 10U;
 
     if ((auto_state <= AUTO_TRACK_STATE_FOLLOW_DA) &&
         (auto_state != AUTO_TRACK_STATE_IDLE)) {
-        AutoTrackTask_UpdateEndpointAlert();
+        AutoTrackTask_UpdateEndpointAlert(elapsed_ticks);
     }
 
     if ((auto_state <= AUTO_TRACK_STATE_FOLLOW_DA) &&
         (auto_state != AUTO_TRACK_STATE_IDLE)) {
-        auto_total_ticks++;
-        auto_segment_ticks++;
+        auto_total_ticks = AutoTrackTask_AddTicks(auto_total_ticks, elapsed_ticks);
+        auto_segment_ticks = AutoTrackTask_AddTicks(auto_segment_ticks, elapsed_ticks);
     }
 
     switch (auto_state) {
@@ -506,7 +532,7 @@ void AutoTrackTask_Update(float dt_sec)
             break;
         case AUTO_TRACK_STATE_FINISHED:
         case AUTO_TRACK_STATE_ERROR:
-            AutoTrackTask_UpdateAlert();
+            AutoTrackTask_UpdateAlert(elapsed_ticks);
             break;
         case AUTO_TRACK_STATE_PAUSED_B:
         case AUTO_TRACK_STATE_PAUSED_C:

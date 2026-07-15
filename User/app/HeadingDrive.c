@@ -144,8 +144,10 @@ void HeadingDrive_UpdateWithDt(float dt_sec)
     if (!hd_data.enabled) return;
 
     if (!Heading_UpdateWithDt(dt_sec)) {
+        hd_data.enabled = 0U;
         hd_data.state = (Heading_GetState() == HEADING_STATE_CALIBRATING) ?
             HD_STATE_CALIBRATING : HD_STATE_SENSOR_FAIL;
+        HeadingDrive_ResetController();
         HeadingDrive_SetTargets(0, 0);
         return;
     }

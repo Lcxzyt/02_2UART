@@ -142,34 +142,40 @@ void IMU_GetInfo(char *buf, uint16_t len)
 /* ══════════════════════════════════════════
    数据采集
    ══════════════════════════════════════════ */
-void IMU_ReadRaw(IMU_RawData *raw)
+uint8_t IMU_ReadRaw(IMU_RawData *raw)
 {
+    bool mpu_ok;
+    bool mag_ok;
+
     if (raw == 0) {
-        return;
+        return 0U;
     }
 
     /* 读取 MPU6050 6 轴数据 */
-    MPU6050_GetData(&raw->AccelX, &raw->AccelY, &raw->AccelZ,
-                    &raw->GyroX,  &raw->GyroY,  &raw->GyroZ);
+    mpu_ok = MPU6050_GetData(&raw->AccelX, &raw->AccelY, &raw->AccelZ,
+                             &raw->GyroX,  &raw->GyroY,  &raw->GyroZ);
 
     /* 读取 QMC5883P 3 轴数据 */
-    (void)QMC5883L_GetData(&raw->MagX, &raw->MagY, &raw->MagZ);
+    mag_ok = QMC5883L_GetData(&raw->MagX, &raw->MagY, &raw->MagZ);
+    return (mpu_ok && mag_ok) ? 1U : 0U;
 }
 
-void IMU_ReadScaled(IMU_ScaledData *sc)
+uint8_t IMU_ReadScaled(IMU_ScaledData *sc)
 {
     int16_t ax, ay, az, gx, gy, gz, mx, my, mz;
     int16_t temp_raw;
     uint8_t temp_h;
     uint8_t temp_l;
+    bool mpu_ok;
+    bool mag_ok;
 
     if (sc == 0) {
-        return;
+        return 0U;
     }
 
     /* ———— 读取原始数据 ———— */
-    MPU6050_GetData(&ax, &ay, &az, &gx, &gy, &gz);
-    (void)QMC5883L_GetData(&mx, &my, &mz);
+    mpu_ok = MPU6050_GetData(&ax, &ay, &az, &gx, &gy, &gz);
+    mag_ok = QMC5883L_GetData(&mx, &my, &mz);
 
     /* 温度（MPU6050 内部） */
     temp_h = MPU6050_ReadRegValue(MPU6050_TEMP_OUT_H);
@@ -191,6 +197,7 @@ void IMU_ReadScaled(IMU_ScaledData *sc)
 
     /* MPU6050 温度公式: T = Temp/340 + 36.53 (°C) */
     sc->Temp   = (float)temp_raw / 340.0f + 36.53f;
+    return (mpu_ok && mag_ok) ? 1U : 0U;
 }
 
 /* ══════════════════════════════════════════
@@ -278,7 +285,9 @@ float IMU_GetYaw(void)
     float roll;
     float pitch;
 
-    IMU_ReadScaled(&sc);
+    if (!IMU_ReadScaled(&sc)) {
+        return 0.0f;
+    }
     IMU_AccelToAngles(&sc, &roll, &pitch);
     return IMU_ComputeHeading(&sc, roll, pitch);
 }

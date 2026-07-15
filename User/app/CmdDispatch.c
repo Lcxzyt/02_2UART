@@ -10,6 +10,8 @@
 #include "Serial.h"
 #include "Tracking.h"
 #include "Timer.h"
+#include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
 
 #define Cmd_Printf(...) do { Serial_Printf(__VA_ARGS__); Bluetooth_Printf(__VA_ARGS__); } while (0)
@@ -93,11 +95,45 @@ static uint8_t Cmd_UpdateIrBitsFromTrack(const Tracking_Data *track)
     return cmd_ir_bits;
 }
 
-static int16_t Clamp_Target(int16_t target)
+static uint8_t Parse_LongValue(const char *text, long *value)
 {
-    if (target > TARGET_MAX_COUNTS_20MS) return TARGET_MAX_COUNTS_20MS;
-    if (target < -TARGET_MAX_COUNTS_20MS) return -TARGET_MAX_COUNTS_20MS;
-    return target;
+    char *end;
+    long parsed;
+
+    if ((text == 0) || (value == 0) || (*text == '\0')) return 0U;
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if ((end == text) || (errno == ERANGE)) return 0U;
+    while (isspace((unsigned char)*end)) end++;
+    if (*end != '\0') return 0U;
+    *value = parsed;
+    return 1U;
+}
+
+static uint8_t Parse_TargetValue(const char *text, int16_t *value)
+{
+    long parsed;
+
+    if (!Parse_LongValue(text, &parsed)) return 0U;
+    if (parsed > TARGET_MAX_COUNTS_20MS) parsed = TARGET_MAX_COUNTS_20MS;
+    if (parsed < -TARGET_MAX_COUNTS_20MS) parsed = -TARGET_MAX_COUNTS_20MS;
+    *value = (int16_t)parsed;
+    return 1U;
+}
+
+static uint8_t Parse_GainValue(const char *text, float *value)
+{
+    char *end;
+    float parsed;
+
+    if ((text == 0) || (value == 0) || (*text == '\0')) return 0U;
+    errno = 0;
+    parsed = strtof(text, &end);
+    if ((end == text) || (errno == ERANGE)) return 0U;
+    while (isspace((unsigned char)*end)) end++;
+    if ((*end != '\0') || (!(parsed >= 0.0f && parsed <= 100.0f))) return 0U;
+    *value = parsed;
+    return 1U;
 }
 
 static void Apply_Targets(void)
@@ -138,8 +174,9 @@ static void Print_Params(uint8_t target)
     IMUTest_GetLast(&imu);
 
     Param_Printf(target,
-        "STAT Run=%u V=%u IR=%u IMU=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu\r\n",
+        "STAT Run=%u Safe=%u V=%u IR=%u IMU=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu\r\n",
         (unsigned int)g_Run,
+        (unsigned int)Timer_WasSafetyStop(),
         (unsigned int)g_Stream,
         (unsigned int)g_IrStream,
         (unsigned int)g_ImuStream,
@@ -196,6 +233,9 @@ static uint8_t Is_LineCmd(uint8_t c)
             c == 'r' || c == 'R' || c == 'u' || c == 'U' ||
             c == 'q' || c == 'Q' || c == 'w' || c == 'W' ||
             c == 'e' || c == 'E' ||
+            c == 'j' || c == 'J' || c == 'k' || c == 'K' ||
+            c == 'n' || c == 'N' || c == 'g' || c == 'G' ||
+            c == 'z' || c == 'Z' ||
             c == 'h' || c == 'H' ||
             c == 'o' || c == 'O' ||
             c == 'a' || c == 'A');
@@ -205,6 +245,7 @@ static void Parse_TuneLine(char *line, uint8_t source)
 {
     float kp, ki, kd;
     float lkp, lki, lkd;
+    float hkp, hki, hkd;
     int16_t value;
     char c = line[0];
     if (c >= 'A' && c <= 'Z') c += 32;
@@ -217,47 +258,112 @@ static void Parse_TuneLine(char *line, uint8_t source)
 
     Motor_PID_GetTunings(&kp, &ki, &kd);
     LineFollow_GetTunings(&lkp, &lki, &lkd);
-    value = Clamp_Target((int16_t)atoi(line + 1));
-
+    HeadingDrive_GetTunings(&hkp, &hki, &hkd);
     switch (c) {
         case 'p':
-            kp = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &kp)) {
+                Param_Printf(source, "ERR p gain must be 0..100\r\n");
+                return;
+            }
             Motor_PID_SetTunings(kp, ki, kd);
             break;
         case 'i':
-            ki = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &ki)) {
+                Param_Printf(source, "ERR i gain must be 0..100\r\n");
+                return;
+            }
             Motor_PID_SetTunings(kp, ki, kd);
             break;
         case 'd':
-            kd = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &kd)) {
+                Param_Printf(source, "ERR d gain must be 0..100\r\n");
+                return;
+            }
             Motor_PID_SetTunings(kp, ki, kd);
             break;
         case 'q':
-            lkp = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &lkp)) {
+                Param_Printf(source, "ERR q gain must be 0..100\r\n");
+                return;
+            }
             LineFollow_SetTunings(lkp, lki, lkd);
             break;
         case 'w':
-            lki = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &lki)) {
+                Param_Printf(source, "ERR w gain must be 0..100\r\n");
+                return;
+            }
             LineFollow_SetTunings(lkp, lki, lkd);
             break;
         case 'e':
-            lkd = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &lkd)) {
+                Param_Printf(source, "ERR e gain must be 0..100\r\n");
+                return;
+            }
             LineFollow_SetTunings(lkp, lki, lkd);
+            break;
+        case 'j':
+            if (!Parse_GainValue(line + 1, &hkp)) {
+                Param_Printf(source, "ERR j gain must be 0..100\r\n");
+                return;
+            }
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'k':
+            if (!Parse_GainValue(line + 1, &hki)) {
+                Param_Printf(source, "ERR k gain must be 0..100\r\n");
+                return;
+            }
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'n':
+            if (!Parse_GainValue(line + 1, &hkd)) {
+                Param_Printf(source, "ERR n gain must be 0..100\r\n");
+                return;
+            }
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'g':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR diff limit must be an integer\r\n");
+                return;
+            }
+            HeadingDrive_SetDiffLimit(value);
+            break;
+        case 'z':
+            if ((!Parse_TargetValue(line + 1, &value)) ||
+                ((value != -1) && (value != 1))) {
+                Param_Printf(source, "ERR output sign must be -1 or 1\r\n");
+                return;
+            }
+            HeadingDrive_SetOutputSign((int8_t)value);
             break;
         case 't':
         case 'b':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR speed must be an integer\r\n");
+                return;
+            }
             cmd_target_l = value;
             cmd_target_r = value;
             g_Run = (value != 0) ? 1U : 0U;
             Apply_Targets();
             break;
         case 'l':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR speed must be an integer\r\n");
+                return;
+            }
             cmd_target_l = value;
             cmd_target_r = 0;
             g_Run = (value != 0) ? 1U : 0U;
             Apply_Targets();
             break;
         case 'r':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR speed must be an integer\r\n");
+                return;
+            }
             cmd_target_l = 0;
             cmd_target_r = value;
             g_Run = (value != 0) ? 1U : 0U;
@@ -278,7 +384,11 @@ static void Parse_TuneLine(char *line, uint8_t source)
             } else {
                 const char *speed_arg = &line[1];
                 if (*speed_arg != '\0') {
-                    int16_t hd_speed = Clamp_Target((int16_t)atoi(speed_arg));
+                    int16_t hd_speed;
+                    if (!Parse_TargetValue(speed_arg, &hd_speed)) {
+                        Param_Printf(source, "ERR heading speed must be an integer\r\n");
+                        return;
+                    }
                     if (hd_speed < 0) hd_speed = (int16_t)-hd_speed;
                     HeadingDrive_SetBaseSpeed(hd_speed);
                 }
@@ -305,6 +415,10 @@ static void Parse_TuneLine(char *line, uint8_t source)
             }
             break;
         case 'o':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR pwm must be an integer\r\n");
+                return;
+            }
             if (LineFollow_IsEnabled()) {
                 LineFollow_Stop();
             }
@@ -320,9 +434,18 @@ static void Parse_TuneLine(char *line, uint8_t source)
             }
             break;
         case 'u':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR base speed must be an integer\r\n");
+                return;
+            }
             LineFollow_SetBaseSpeed(value);
+            HeadingDrive_SetBaseSpeed(value);
             break;
         case 'a':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR mode must be 0 or 1\r\n");
+                return;
+            }
             /* A0 = IDLE, A1 = AutoTrack */
             if (value >= 0 && value <= 1) {
                 TaskController_Start((TaskMode)value);

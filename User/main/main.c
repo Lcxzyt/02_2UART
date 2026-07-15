@@ -52,6 +52,7 @@ int main(void)
 
     /* ── 主循环 ── */
     while (1) {
+        Timer_NotifyMainAlive();
         CmdDispatch_Process();
 
         if (g_ImuDisplayDirty) {
@@ -84,6 +85,10 @@ int main(void)
                 LineFollow_Update();
             } else if (HeadingDrive_IsEnabled()) {
                 HeadingDrive_UpdateWithDt((float)sample_ticks * 0.020f);
+                if (HeadingDrive_GetState() == HD_STATE_SENSOR_FAIL) {
+                    g_Run = 0U;
+                    Motor_Control_Stop();
+                }
             }
 
             /* ── 调试流输出 ── */

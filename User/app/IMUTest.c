@@ -13,18 +13,18 @@
 static IMUTest_Data imu_last;
 static bool imu_inited = false;
 static bool imu_init_tried = false;
+static char imu_printf_buffer[IMU_PRINTF_BUF_SIZE];
 
 static void IMUTest_Printf(char *format, ...)
 {
-    char buf[IMU_PRINTF_BUF_SIZE];
     va_list arg;
 
     va_start(arg, format);
-    (void)vsnprintf(buf, sizeof(buf), format, arg);
+    (void)vsnprintf(imu_printf_buffer, sizeof(imu_printf_buffer), format, arg);
     va_end(arg);
 
-    Serial_SendString(buf);
-    Bluetooth_SendString(buf);
+    Serial_SendString(imu_printf_buffer);
+    Bluetooth_SendString(imu_printf_buffer);
 }
 
 static int16_t IMUTest_RoundDeg(float value)
@@ -66,7 +66,11 @@ bool IMUTest_ReadMagRaw(int16_t *magX, int16_t *magY, int16_t *magZ)
         (void)IMUTest_Init();
     }
 
-    IMU_ReadRaw(&raw);
+    if ((!imu_inited) || (!IMU_ReadRaw(&raw))) {
+        imu_last.MpuOk = false;
+        imu_last.MagOk = false;
+        return false;
+    }
 
     if (magX != 0) *magX = raw.MagX;
     if (magY != 0) *magY = raw.MagY;
@@ -75,9 +79,9 @@ bool IMUTest_ReadMagRaw(int16_t *magX, int16_t *magY, int16_t *magZ)
     imu_last.MagX = raw.MagX;
     imu_last.MagY = raw.MagY;
     imu_last.MagZ = raw.MagZ;
-    imu_last.MpuOk = imu_inited;
-    imu_last.MagOk = imu_inited;
-    return imu_inited;
+    imu_last.MpuOk = true;
+    imu_last.MagOk = true;
+    return true;
 }
 
 void IMUTest_SetMagCalibration(float offsetX, float offsetY, float offsetZ,
@@ -118,14 +122,27 @@ bool IMUTest_Read(IMUTest_Data *data)
         (void)IMUTest_Init();
     }
 
-    IMU_ReadRaw(&raw);
-    IMU_ReadScaled(&sc);
-    if (imu_inited) {
+    if (imu_inited && IMU_ReadRaw(&raw) && IMU_ReadScaled(&sc)) {
         IMU_GetAttitudeRaw(&sc, &att);
     } else {
+        raw.AccelX = 0;
+        raw.AccelY = 0;
+        raw.AccelZ = 0;
+        raw.GyroX = 0;
+        raw.GyroY = 0;
+        raw.GyroZ = 0;
+        raw.MagX = 0;
+        raw.MagY = 0;
+        raw.MagZ = 0;
         att.Roll = 0.0f;
         att.Pitch = 0.0f;
         att.Yaw = 0.0f;
+        imu_last.MpuOk = false;
+        imu_last.MagOk = false;
+        if (data != 0) {
+            *data = imu_last;
+        }
+        return false;
     }
 
     imu_last.AccelX = raw.AccelX;
@@ -143,14 +160,14 @@ bool IMUTest_Read(IMUTest_Data *data)
     imu_last.MpuId = MPU6050_GetID();
     imu_last.MagAddr = QMC5883L_GetAddr();
     imu_last.MagId = QMC5883L_GetID();
-    imu_last.MpuOk = imu_inited;
-    imu_last.MagOk = imu_inited;
+    imu_last.MpuOk = true;
+    imu_last.MagOk = true;
 
     if (data != 0) {
         *data = imu_last;
     }
 
-    return imu_inited;
+    return true;
 }
 
 bool IMUTest_Print(void)

@@ -3,6 +3,7 @@
 #include "BoardIO.h"
 #include "CmdDispatch.h"
 #include "IMUTest.h"
+#include "LineFollow.h"
 #include "Motor.h"
 #include "OLED.h"
 #include "TaskController.h"
@@ -192,23 +193,6 @@ void Display_Update(void)
     } else if (app_oled_page == APP_OLED_PAGE_ADC) {
         Show_Task1Data();
     }
-}
-
-/* ══════════════════════════════════════════
-   页面: 欢迎 / 待机
-   ══════════════════════════════════════════ */
-static void Show_WaitScreen(void)
-{
-    if (!display_oled_ok) return;
-
-    OLED_ClearFault();
-    OLED_Clear();
-    OLED_ShowString(1, 1, "PID Tune UART");
-    OLED_ShowString(2, 1, "BT PA8 PA9");
-    OLED_ShowString(3, 1, "m page toggle");
-    OLED_ShowString(4, 1, "? params v log");
-    display_layout = DISPLAY_LAYOUT_WAIT;
-    Invalidate_DisplayCaches();
 }
 
 /* ══════════════════════════════════════════
