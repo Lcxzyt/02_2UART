@@ -32,9 +32,9 @@ static uint8_t auto_white_count;
 static uint8_t auto_line_bits;
 static uint16_t auto_line_strength;
 static int16_t auto_line_error;
-static int16_t auto_base_yaw;
-static int16_t auto_reverse_yaw;
-static int16_t auto_target_yaw;
+static float auto_base_yaw;
+static float auto_reverse_yaw;
+static float auto_target_yaw;
 static uint16_t auto_segment_ticks;
 static uint16_t auto_total_ticks;
 static uint16_t auto_alert_ticks;
@@ -42,15 +42,17 @@ static uint16_t auto_endpoint_alert_ticks;
 static uint8_t  auto_checkpoint_mode;
 static uint8_t  auto_paused_next_state;  /* 暂停前保存即将进入的状态 */
 
-static int16_t AutoTrackTask_NormalizeYaw(int16_t yaw_deg)
+static float AutoTrackTask_NormalizeYaw(float yaw_deg)
 {
-    while (yaw_deg < 0) {
-        yaw_deg = (int16_t)(yaw_deg + 360);
-    }
-    while (yaw_deg >= 360) {
-        yaw_deg = (int16_t)(yaw_deg - 360);
-    }
+    while (yaw_deg < 0.0f) yaw_deg += 360.0f;
+    while (yaw_deg >= 360.0f) yaw_deg -= 360.0f;
     return yaw_deg;
+}
+
+static int16_t AutoTrackTask_RoundYaw(float yaw_deg)
+{
+    yaw_deg = AutoTrackTask_NormalizeYaw(yaw_deg);
+    return (int16_t)(yaw_deg + 0.5f);
 }
 
 static void AutoTrackTask_ClearCounts(void)
@@ -201,7 +203,7 @@ static void AutoTrackTask_EnterFinished(void)
     BoardIO_LedSet(1U);
 }
 
-static uint8_t AutoTrackTask_StartStraight(int16_t target_yaw)
+static uint8_t AutoTrackTask_StartStraight(float target_yaw)
 {
     if (LineFollow_IsEnabled()) {
         LineFollow_Stop();
@@ -209,7 +211,7 @@ static uint8_t AutoTrackTask_StartStraight(int16_t target_yaw)
     Motor_OpenLoop_Stop();
     HeadingDrive_SetBaseSpeed(AUTO_STRAIGHT_SPEED);
     HeadingDrive_SetTunings(0.800f, AUTO_HD_KI, 0.250f);
-    HeadingDrive_SetTargetYaw(target_yaw);
+    HeadingDrive_SetTargetYawF(target_yaw);
     auto_target_yaw = AutoTrackTask_NormalizeYaw(target_yaw);
     if (!HeadingDrive_StartStraight()) {
         AutoTrackTask_EnterError(AUTO_TRACK_ERROR_HEADING);
@@ -227,7 +229,7 @@ static void AutoTrackTask_StartFollow(uint8_t next_state)
     Motor_OpenLoop_Stop();
     LineFollow_SetBaseSpeed(AUTO_ARC_SPEED);
     LineFollow_Start();
-    auto_target_yaw = 0;
+    auto_target_yaw = 0.0f;
     g_Run = 1U;
     AutoTrackTask_SetState(next_state);
 }
@@ -392,9 +394,9 @@ void AutoTrackTask_Init(void)
     auto_line_bits = 0U;
     auto_line_strength = 0U;
     auto_line_error = 0;
-    auto_base_yaw = 0;
-    auto_reverse_yaw = 180;
-    auto_target_yaw = 0;
+    auto_base_yaw = 0.0f;
+    auto_reverse_yaw = 180.0f;
+    auto_target_yaw = 0.0f;
     auto_total_ticks = 0U;
     auto_alert_ticks = 0U;
     auto_endpoint_alert_ticks = AUTO_ENDPOINT_ALERT_TICKS;
@@ -421,8 +423,8 @@ void AutoTrackTask_Start(void)
         return;
     }
 
-    auto_base_yaw = AutoTrackTask_NormalizeYaw(HeadingDrive_GetTargetYaw());
-    auto_reverse_yaw = AutoTrackTask_NormalizeYaw((int16_t)(auto_base_yaw + 180));
+    auto_base_yaw = AutoTrackTask_NormalizeYaw(HeadingDrive_GetTargetYawF());
+    auto_reverse_yaw = AutoTrackTask_NormalizeYaw(auto_base_yaw + 180.0f);
     auto_target_yaw = auto_base_yaw;
     auto_state = AUTO_TRACK_STATE_PRECHECK;
 }
@@ -563,8 +565,8 @@ uint8_t AutoTrackTask_GetBlackCount(void) { return auto_black_count; }
 uint8_t AutoTrackTask_GetWhiteCount(void) { return auto_white_count; }
 uint16_t AutoTrackTask_GetLineStrength(void) { return auto_line_strength; }
 int16_t AutoTrackTask_GetLineError(void) { return auto_line_error; }
-int16_t AutoTrackTask_GetBaseYaw(void) { return auto_base_yaw; }
-int16_t AutoTrackTask_GetReverseYaw(void) { return auto_reverse_yaw; }
-int16_t AutoTrackTask_GetTargetYaw(void) { return auto_target_yaw; }
+int16_t AutoTrackTask_GetBaseYaw(void) { return AutoTrackTask_RoundYaw(auto_base_yaw); }
+int16_t AutoTrackTask_GetReverseYaw(void) { return AutoTrackTask_RoundYaw(auto_reverse_yaw); }
+int16_t AutoTrackTask_GetTargetYaw(void) { return AutoTrackTask_RoundYaw(auto_target_yaw); }
 uint16_t AutoTrackTask_GetSegmentTicks(void) { return auto_segment_ticks; }
 uint16_t AutoTrackTask_GetTotalTicks(void) { return auto_total_ticks; }

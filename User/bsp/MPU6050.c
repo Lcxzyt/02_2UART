@@ -43,8 +43,8 @@ uint8_t MPU6050_Init(void)
     (void)MPU6050_WriteReg(MPU6050_PWR_MGMT_1, 0x00U);
     Delay_ms(10U);
     (void)MPU6050_WriteReg(MPU6050_SMPLRT_DIV, 0x07U);
-    (void)MPU6050_WriteReg(MPU6050_CONFIG, 0x06U);
-    (void)MPU6050_WriteReg(MPU6050_GYRO_CONFIG, 0x18U);
+    (void)MPU6050_WriteReg(MPU6050_CONFIG, 0x03U);       /* DLPF: ~42Hz gyro */
+    (void)MPU6050_WriteReg(MPU6050_GYRO_CONFIG, MPU6050_GYRO_CONFIG_VALUE);
     (void)MPU6050_WriteReg(MPU6050_ACCEL_CONFIG, 0x00U);
     (void)MPU6050_WriteReg(MPU6050_PWR_MGMT_2, 0x00U);
     (void)MPU6050_WriteReg(MPU6050_INT_ENABLE, 0x00U);

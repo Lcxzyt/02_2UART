@@ -5,7 +5,7 @@
 #define HD_TARGET_LIMIT       300
 #define HD_BASE_SPEED_DEFAULT 20
 #define HD_DIFF_LIMIT_DEFAULT 8
-#define HD_INTEGRAL_LIMIT     1000L
+#define HD_INTEGRAL_LIMIT     1000.0f
 /* D term reference sample period. hd_kd was tuned assuming an implicit
    20ms tick; dividing the raw error delta by dt_sec directly would rescale
    Kd by ~50x and require a full retune. Instead we scale by (ref/dt), which
@@ -17,7 +17,7 @@ static HeadingDrive_Data hd_data;
 static float hd_kp = 0.800f;
 static float hd_ki = 0.000f;
 static float hd_kd = 0.250f;
-static int16_t hd_last_error;
+static float hd_last_error;
 static uint8_t hd_target_valid;
 
 static int16_t Clamp_Int16(int16_t value, int16_t min, int16_t max)
@@ -27,7 +27,7 @@ static int16_t Clamp_Int16(int16_t value, int16_t min, int16_t max)
     return value;
 }
 
-static int32_t Clamp_Int32(int32_t value, int32_t min, int32_t max)
+static float Clamp_Float(float value, float min, float max)
 {
     if (value > max) return max;
     if (value < min) return min;
@@ -39,23 +39,19 @@ static int16_t Round_Float_ToInt16(float value)
     return (int16_t)((value >= 0.0f) ? (value + 0.5f) : (value - 0.5f));
 }
 
-static int16_t HeadingDrive_NormalizeYaw(int16_t yaw_deg)
+static float HeadingDrive_NormalizeYawF(float yaw_deg)
 {
-    while (yaw_deg < 0) {
-        yaw_deg = (int16_t)(yaw_deg + 360);
-    }
-    while (yaw_deg >= 360) {
-        yaw_deg = (int16_t)(yaw_deg - 360);
-    }
+    while (yaw_deg < 0.0f) yaw_deg += 360.0f;
+    while (yaw_deg >= 360.0f) yaw_deg -= 360.0f;
     return yaw_deg;
 }
 
 static void HeadingDrive_ResetController(void)
 {
-    hd_data.error_deg = 0;
+    hd_data.error_deg = 0.0f;
     hd_data.last_diff = 0;
-    hd_data.integral = 0;
-    hd_last_error = 0;
+    hd_data.integral = 0.0f;
+    hd_last_error = 0.0f;
 }
 
 static void HeadingDrive_SetTargets(int16_t left, int16_t right)
@@ -69,8 +65,8 @@ void HeadingDrive_Init(void)
     hd_data.enabled = 0U;
     hd_data.state = HD_STATE_IDLE;
     hd_data.base_speed = HD_BASE_SPEED_DEFAULT;
-    hd_data.target_yaw = 0;
-    hd_data.current_yaw = 0;
+    hd_data.target_yaw = 0.0f;
+    hd_data.current_yaw = 0.0f;
     hd_data.diff_limit = HD_DIFF_LIMIT_DEFAULT;
     hd_data.output_sign = -1;
     hd_target_valid = 0U;
@@ -88,7 +84,7 @@ uint8_t HeadingDrive_CaptureTarget(void)
         return 0U;
     }
 
-    hd_data.current_yaw = Heading_GetYawDeg();
+    hd_data.current_yaw = Heading_GetYawDegF();
     hd_data.target_yaw = hd_data.current_yaw;
     hd_target_valid = 1U;
     if (!hd_data.enabled) {
@@ -100,7 +96,12 @@ uint8_t HeadingDrive_CaptureTarget(void)
 
 void HeadingDrive_SetTargetYaw(int16_t yaw_deg)
 {
-    hd_data.target_yaw = HeadingDrive_NormalizeYaw(yaw_deg);
+    HeadingDrive_SetTargetYawF((float)yaw_deg);
+}
+
+void HeadingDrive_SetTargetYawF(float yaw_deg)
+{
+    hd_data.target_yaw = HeadingDrive_NormalizeYawF(yaw_deg);
     hd_target_valid = 1U;
     HeadingDrive_ResetController();
 }
@@ -133,8 +134,8 @@ void HeadingDrive_Stop(void)
 
 void HeadingDrive_UpdateWithDt(float dt_sec)
 {
-    int16_t error;
-    int16_t delta;
+    float error;
+    float delta;
     int16_t diff;
     int16_t left;
     int16_t right;
@@ -158,23 +159,22 @@ void HeadingDrive_UpdateWithDt(float dt_sec)
         return;
     }
 
-    hd_data.current_yaw = Heading_GetYawDeg();
+    hd_data.current_yaw = Heading_GetYawDegF();
     if (hd_data.state != HD_STATE_RUN) {
-        hd_data.target_yaw = hd_data.current_yaw;
         hd_data.state = HD_STATE_RUN;
         HeadingDrive_ResetController();
     }
 
-    error = Heading_AngleDiffDeg(hd_data.target_yaw, hd_data.current_yaw);
-    hd_data.integral = Clamp_Int32(hd_data.integral + error,
+    error = Heading_AngleDiffDegF(hd_data.target_yaw, hd_data.current_yaw);
+    hd_data.integral = Clamp_Float(hd_data.integral + error,
                                    -HD_INTEGRAL_LIMIT,
                                    HD_INTEGRAL_LIMIT);
-    delta = (int16_t)(error - hd_last_error);
+    delta = error - hd_last_error;
     dt_ratio = (dt_sec > 0.0f) ? (HD_DT_REF_SEC / dt_sec) : 1.0f;
 
-    output = (hd_kp * (float)error) +
-             (hd_ki * (float)hd_data.integral) +
-             (hd_kd * (float)delta * dt_ratio);
+    output = (hd_kp * error) +
+             (hd_ki * hd_data.integral) +
+             (hd_kd * delta * dt_ratio);
     diff = Round_Float_ToInt16(output);
     diff = Clamp_Int16(diff, (int16_t)-hd_data.diff_limit, hd_data.diff_limit);
     diff = (int16_t)(diff * hd_data.output_sign);
@@ -233,12 +233,19 @@ int8_t HeadingDrive_GetOutputSign(void) { return hd_data.output_sign; }
 
 uint8_t HeadingDrive_IsEnabled(void) { return hd_data.enabled; }
 uint8_t HeadingDrive_GetState(void) { return hd_data.state; }
-int16_t HeadingDrive_GetTargetYaw(void) { return hd_data.target_yaw; }
-int16_t HeadingDrive_GetCurrentYaw(void) { return hd_data.current_yaw; }
-int16_t HeadingDrive_GetErrorDeg(void) { return hd_data.error_deg; }
+int16_t HeadingDrive_GetTargetYaw(void) { return Round_Float_ToInt16(hd_data.target_yaw); }
+int16_t HeadingDrive_GetCurrentYaw(void) { return Round_Float_ToInt16(hd_data.current_yaw); }
+int16_t HeadingDrive_GetErrorDeg(void) { return Round_Float_ToInt16(hd_data.error_deg); }
+float HeadingDrive_GetTargetYawF(void) { return hd_data.target_yaw; }
+float HeadingDrive_GetCurrentYawF(void) { return hd_data.current_yaw; }
+float HeadingDrive_GetErrorDegF(void) { return hd_data.error_deg; }
 int16_t HeadingDrive_GetLastDiff(void) { return hd_data.last_diff; }
 uint8_t HeadingDrive_HasTarget(void) { return hd_target_valid; }
-int32_t HeadingDrive_GetIntegral(void) { return hd_data.integral; }
+int32_t HeadingDrive_GetIntegral(void)
+{
+    float value = hd_data.integral;
+    return (int32_t)((value >= 0.0f) ? (value + 0.5f) : (value - 0.5f));
+}
 
 const HeadingDrive_Data *HeadingDrive_GetData(void)
 {

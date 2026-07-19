@@ -3,6 +3,8 @@
 #include "Encoder.h"
 #include "Bluetooth.h"
 #include "IMUTest.h"
+#include "IMU.h"
+#include "Heading.h"
 #include "LineFollow.h"
 #include "HeadingDrive.h"
 #include "TaskController.h"
@@ -703,26 +705,93 @@ void CmdDispatch_PrintTracking(uint8_t target)
 void CmdDispatch_PrintImu(uint8_t target)
 {
     IMUTest_Data imu;
-    bool ok = IMUTest_Read(&imu);
+    const Heading_Data *heading = Heading_GetData();
 
-    /* IMU,ok,ax,ay,az,gx,gy,gz,mx,my,mz,roll,pitch,yaw,mpuOk,magOk */
-    Param_Printf(target,
-                 "IMU,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u\r\n",
-                 ok ? 1U : 0U,
-                 (int)imu.AccelX,
-                 (int)imu.AccelY,
-                 (int)imu.AccelZ,
-                 (int)imu.GyroX,
-                 (int)imu.GyroY,
-                 (int)imu.GyroZ,
-                 (int)imu.MagX,
-                 (int)imu.MagY,
-                 (int)imu.MagZ,
-                 (int)imu.RollDeg,
-                 (int)imu.PitchDeg,
-                 (int)imu.YawDeg,
-                 (unsigned int)imu.MpuOk,
-                 (unsigned int)imu.MagOk);
+    if (heading->gyro_calibrated) {
+        IMU_Sample sample;
+        if (IMU_GetLastSample(&sample)) {
+            int gz100 = (int)((heading->gyro_z_dps >= 0.0f) ?
+                              (heading->gyro_z_dps * 100.0f + 0.5f) :
+                              (heading->gyro_z_dps * 100.0f - 0.5f));
+            int bias100 = (int)((heading->gyro_bias_z_dps >= 0.0f) ?
+                                (heading->gyro_bias_z_dps * 100.0f + 0.5f) :
+                                (heading->gyro_bias_z_dps * 100.0f - 0.5f));
+            int mx100 = (int)((sample.Scaled.MagX >= 0.0f) ?
+                              (sample.Scaled.MagX * 100.0f + 0.5f) :
+                              (sample.Scaled.MagX * 100.0f - 0.5f));
+            int my100 = (int)((sample.Scaled.MagY >= 0.0f) ?
+                              (sample.Scaled.MagY * 100.0f + 0.5f) :
+                              (sample.Scaled.MagY * 100.0f - 0.5f));
+            int mz100 = (int)((sample.Scaled.MagZ >= 0.0f) ?
+                              (sample.Scaled.MagZ * 100.0f + 0.5f) :
+                              (sample.Scaled.MagZ * 100.0f - 0.5f));
+            int norm100 = (int)(heading->mag_norm_uT * 100.0f + 0.5f);
+            int roll100 = (int)((heading->roll_deg >= 0.0f) ?
+                                (heading->roll_deg * 100.0f + 0.5f) :
+                                (heading->roll_deg * 100.0f - 0.5f));
+            int pitch100 = (int)((heading->pitch_deg >= 0.0f) ?
+                                 (heading->pitch_deg * 100.0f + 0.5f) :
+                                 (heading->pitch_deg * 100.0f - 0.5f));
+            int mag_yaw100 = (int)(heading->yaw_mag_deg * 100.0f + 0.5f);
+            int fused_yaw100 = (int)(heading->yaw_fused_deg * 100.0f + 0.5f);
+            float target_yaw = HeadingDrive_GetTargetYawF();
+            float error = Heading_AngleDiffDegF(target_yaw,
+                                                 heading->yaw_fused_deg);
+            int target100 = (int)(target_yaw * 100.0f + 0.5f);
+            int error100 = (int)((error >= 0.0f) ?
+                                 (error * 100.0f + 0.5f) :
+                                 (error * 100.0f - 0.5f));
+
+            /* Values ending in 100 are fixed-point values scaled by 100. */
+            Param_Printf(target,
+                "HDG,%u,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%d\r\n",
+                (unsigned int)sample.MpuValid,
+                (unsigned int)sample.MagReadValid,
+                (unsigned int)sample.MagReady,
+                (unsigned int)sample.MagOverflow,
+                (int)sample.Raw.GyroZ,
+                gz100,
+                bias100,
+                mx100,
+                my100,
+                mz100,
+                norm100,
+                roll100,
+                pitch100,
+                (unsigned int)heading->mag_valid,
+                (unsigned int)heading->mag_disturbed,
+                mag_yaw100,
+                fused_yaw100,
+                target100,
+                error100,
+                (int)Motor_GetActual_L(),
+                (int)Motor_GetActual_R());
+            return;
+        }
+    }
+
+    {
+        bool ok = IMUTest_Read(&imu);
+
+        /* IMU,ok,ax,ay,az,gx,gy,gz,mx,my,mz,roll,pitch,yaw,mpuOk,magOk */
+        Param_Printf(target,
+                     "IMU,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u\r\n",
+                     ok ? 1U : 0U,
+                     (int)imu.AccelX,
+                     (int)imu.AccelY,
+                     (int)imu.AccelZ,
+                     (int)imu.GyroX,
+                     (int)imu.GyroY,
+                     (int)imu.GyroZ,
+                     (int)imu.MagX,
+                     (int)imu.MagY,
+                     (int)imu.MagZ,
+                     (int)imu.RollDeg,
+                     (int)imu.PitchDeg,
+                     (int)imu.YawDeg,
+                     (unsigned int)imu.MpuOk,
+                     (unsigned int)imu.MagOk);
+    }
 }
 #define LINE_BUF_SIZE 64U
 

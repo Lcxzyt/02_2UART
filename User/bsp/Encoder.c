@@ -4,15 +4,17 @@
 
 /*
  * MSPM0 移植版编码器：
- * 左轮 B04=PB4=A、B05=PB5=B；右轮 B02=PB2=A、B03=PB3=B。
+ * 实车接线：左轮 B04=PB4=B、B05=PB5=A；右轮 B02=PB2=A、B03=PB3=B。
  * 四个输入脚均开内部上拉，A/B 两相都开双边沿中断，用状态表做正交解码。
  * 如果实测前进方向为负数，只改下面的 ENCODER_SIGN_x，不要改控制层。
+ * 左轮解码仍按已实测通过的 PB4->bit0、PB5->bit1 顺序处理，不在此处交换，
+ * 避免仅修正物理相名时改变现有计数方向。
  */
-#define ENC_L_A_PIN      DL_GPIO_PIN_4
-#define ENC_L_B_PIN      DL_GPIO_PIN_5
+#define ENC_L_DEC0_PIN   DL_GPIO_PIN_4  /* PB4：左编码器物理 B 相 */
+#define ENC_L_DEC1_PIN   DL_GPIO_PIN_5  /* PB5：左编码器物理 A 相 */
 #define ENC_R_A_PIN      DL_GPIO_PIN_2
 #define ENC_R_B_PIN      DL_GPIO_PIN_3
-#define ENC_ALL_PINS     (ENC_L_A_PIN | ENC_L_B_PIN | ENC_R_A_PIN | ENC_R_B_PIN)
+#define ENC_ALL_PINS     (ENC_L_DEC0_PIN | ENC_L_DEC1_PIN | ENC_R_A_PIN | ENC_R_B_PIN)
 
 #define ENCODER_SIGN_L   (+1)
 #define ENCODER_SIGN_R   (-1)
@@ -64,14 +66,14 @@ void Encoder_Init(void)
 {
     Encoder_ConfigInput(IOMUX_PINCM15);  /* B02/PB2: 右编码器 A */
     Encoder_ConfigInput(IOMUX_PINCM16);  /* B03/PB3: 右编码器 B */
-    Encoder_ConfigInput(IOMUX_PINCM17);  /* B04/PB4: 左编码器 A */
-    Encoder_ConfigInput(IOMUX_PINCM18);  /* B05/PB5: 左编码器 B */
+    Encoder_ConfigInput(IOMUX_PINCM17);  /* B04/PB4: 左编码器 B */
+    Encoder_ConfigInput(IOMUX_PINCM18);  /* B05/PB5: 左编码器 A */
 
     enc_count_l = 0;
     enc_count_r = 0;
     enc_total_l = 0;
     enc_total_r = 0;
-    enc_state_l = Encoder_ReadState(ENC_L_A_PIN, ENC_L_B_PIN);
+    enc_state_l = Encoder_ReadState(ENC_L_DEC0_PIN, ENC_L_DEC1_PIN);
     enc_state_r = Encoder_ReadState(ENC_R_A_PIN, ENC_R_B_PIN);
 
     DL_GPIO_setLowerPinsPolarity(GPIOB,
@@ -142,8 +144,8 @@ uint8_t Encoder_GetPinState(void)
     uint32_t pins = DL_GPIO_readPins(GPIOB, ENC_ALL_PINS);
     uint8_t state = 0U;
 
-    if ((pins & ENC_L_A_PIN) != 0U) state |= 0x01U;
-    if ((pins & ENC_L_B_PIN) != 0U) state |= 0x02U;
+    if ((pins & ENC_L_DEC0_PIN) != 0U) state |= 0x01U;
+    if ((pins & ENC_L_DEC1_PIN) != 0U) state |= 0x02U;
     if ((pins & ENC_R_A_PIN) != 0U) state |= 0x04U;
     if ((pins & ENC_R_B_PIN) != 0U) state |= 0x08U;
     return state;
@@ -152,8 +154,8 @@ void GROUP1_IRQHandler(void)
 {
     uint32_t status = DL_GPIO_getEnabledInterruptStatus(GPIOB, ENC_ALL_PINS);
 
-    if ((status & (ENC_L_A_PIN | ENC_L_B_PIN)) != 0U) {
-        uint8_t state = Encoder_ReadState(ENC_L_A_PIN, ENC_L_B_PIN);
+    if ((status & (ENC_L_DEC0_PIN | ENC_L_DEC1_PIN)) != 0U) {
+        uint8_t state = Encoder_ReadState(ENC_L_DEC0_PIN, ENC_L_DEC1_PIN);
         int8_t step = Encoder_DecodeStep(enc_state_l, state);
         enc_count_l += step;
         enc_total_l += step;

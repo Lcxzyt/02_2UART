@@ -6,6 +6,9 @@
 #include "MPU6050_Reg.h"
 
 #define MPU6050_ADDR_7BIT 0x68U
+#define MPU6050_GYRO_CONFIG_VALUE 0x08U
+#define MPU6050_GYRO_LSB_PER_DPS  65.5f
+#define MPU6050_ACCEL_LSB_PER_G   16384.0f
 
 bool    MPU6050_WriteReg(uint8_t regAddress, uint8_t data);
 bool    MPU6050_ReadReg(uint8_t regAddress, uint8_t *data);

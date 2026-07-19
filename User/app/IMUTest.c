@@ -8,7 +8,7 @@
 #include <stdio.h>
 
 #define IMU_PRINTF_BUF_SIZE 160U
-#define MAG_SCALE           (100.0f / 3000.0f)
+#define MAG_SCALE           (100.0f / 3750.0f)
 
 static IMUTest_Data imu_last;
 static bool imu_inited = false;
@@ -45,6 +45,9 @@ static int16_t IMUTest_RoundNormalizeYaw(float yaw)
 
 bool IMUTest_Init(void)
 {
+    if (imu_init_tried) {
+        return imu_inited;
+    }
     imu_init_tried = true;
     imu_inited = (IMU_Init() != 0U);
 
@@ -114,26 +117,16 @@ void IMUTest_GetMagCalibration(float *offsetX, float *offsetY, float *offsetZ,
 
 bool IMUTest_Read(IMUTest_Data *data)
 {
-    IMU_RawData raw;
-    IMU_ScaledData sc;
+    IMU_Sample sample;
     IMU_Attitude att;
 
     if (!imu_init_tried) {
         (void)IMUTest_Init();
     }
 
-    if (imu_inited && IMU_ReadRaw(&raw) && IMU_ReadScaled(&sc)) {
-        IMU_GetAttitudeRaw(&sc, &att);
+    if (imu_inited && IMU_ReadSample(&sample) && sample.MagReadValid) {
+        IMU_GetAttitudeRaw(&sample.Scaled, &att);
     } else {
-        raw.AccelX = 0;
-        raw.AccelY = 0;
-        raw.AccelZ = 0;
-        raw.GyroX = 0;
-        raw.GyroY = 0;
-        raw.GyroZ = 0;
-        raw.MagX = 0;
-        raw.MagY = 0;
-        raw.MagZ = 0;
         att.Roll = 0.0f;
         att.Pitch = 0.0f;
         att.Yaw = 0.0f;
@@ -145,15 +138,15 @@ bool IMUTest_Read(IMUTest_Data *data)
         return false;
     }
 
-    imu_last.AccelX = raw.AccelX;
-    imu_last.AccelY = raw.AccelY;
-    imu_last.AccelZ = raw.AccelZ;
-    imu_last.GyroX = raw.GyroX;
-    imu_last.GyroY = raw.GyroY;
-    imu_last.GyroZ = raw.GyroZ;
-    imu_last.MagX = raw.MagX;
-    imu_last.MagY = raw.MagY;
-    imu_last.MagZ = raw.MagZ;
+    imu_last.AccelX = sample.Raw.AccelX;
+    imu_last.AccelY = sample.Raw.AccelY;
+    imu_last.AccelZ = sample.Raw.AccelZ;
+    imu_last.GyroX = sample.Raw.GyroX;
+    imu_last.GyroY = sample.Raw.GyroY;
+    imu_last.GyroZ = sample.Raw.GyroZ;
+    imu_last.MagX = sample.Raw.MagX;
+    imu_last.MagY = sample.Raw.MagY;
+    imu_last.MagZ = sample.Raw.MagZ;
     imu_last.RollDeg = IMUTest_RoundDeg(att.Roll);
     imu_last.PitchDeg = IMUTest_RoundDeg(att.Pitch);
     imu_last.YawDeg = IMUTest_RoundNormalizeYaw(att.Yaw);

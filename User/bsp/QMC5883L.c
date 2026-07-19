@@ -2,7 +2,7 @@
 #include "MyI2C.h"
 #include "delay.h"
 
-static uint8_t qmc5883_addr = 0x0DU;
+static uint8_t qmc5883_addr = 0x2CU;
 
 void QMC5883L_SetAddr(uint8_t addr7)
 {
@@ -45,6 +45,11 @@ bool QMC5883L_Init(void)
     }
     Delay_ms(5U);
 
+    /* QMC5883P official application sequence: define XYZ axis signs. */
+    if (!QMC5883L_WriteReg(QMC5883L_AXIS_SIGN, 0x06U)) {
+        return false;
+    }
+
     if (!QMC5883L_WriteReg(QMC5883L_CR2,
         (uint8_t)(QMC5883L_CR2_RNG_8G | QMC5883L_CR2_SETRST_ON))) {
         return false;
@@ -77,6 +82,14 @@ uint8_t QMC5883L_GetStatus(void)
     return QMC5883L_ReadReg(QMC5883L_SR);
 }
 
+bool QMC5883L_ReadStatus(uint8_t *status)
+{
+    if (status == 0) {
+        return false;
+    }
+    return MyI2C_ReadReg(qmc5883_addr, QMC5883L_SR, status);
+}
+
 uint8_t QMC5883L_IsDataReady(void)
 {
     return (QMC5883L_GetStatus() & QMC5883L_SR_DRDY) ? 1U : 0U;
@@ -97,4 +110,26 @@ bool QMC5883L_GetData(int16_t *magX, int16_t *magY, int16_t *magZ)
     *magY = (int16_t)(((uint16_t)buf[3] << 8) | buf[2]);
     *magZ = (int16_t)(((uint16_t)buf[5] << 8) | buf[4]);
     return true;
+}
+
+bool QMC5883L_GetDataChecked(int16_t *magX, int16_t *magY, int16_t *magZ,
+                             uint8_t *status)
+{
+    uint8_t sr = 0U;
+
+    if ((magX == 0) || (magY == 0) || (magZ == 0)) {
+        return false;
+    }
+    if (!QMC5883L_ReadStatus(&sr)) {
+        if (status != 0) *status = 0U;
+        return false;
+    }
+    if (status != 0) *status = sr;
+    if ((sr & QMC5883L_SR_OVFL) != 0U) {
+        return false;
+    }
+    if ((sr & QMC5883L_SR_DRDY) == 0U) {
+        return false;
+    }
+    return QMC5883L_GetData(magX, magY, magZ);
 }
