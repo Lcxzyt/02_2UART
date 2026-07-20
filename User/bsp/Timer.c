@@ -5,10 +5,13 @@
 #include "Motor.h"
 
 #define SPEED_FILTER_SHIFT 2U
+#define MAIN_HEARTBEAT_TIMEOUT_TICKS 10U
 
 static int32_t speed_filter_l;
 static int32_t speed_filter_r;
 static uint8_t speed_filter_ready;
+static volatile uint8_t main_heartbeat_ticks;
+static volatile uint8_t safety_stop_latched;
 
 static int16_t Speed_FilterToInt(int32_t value)
 {
@@ -20,7 +23,8 @@ static int16_t Speed_FilterToInt(int32_t value)
 
 static int16_t Speed_FilterUpdate(int32_t *state, int16_t raw)
 {
-    int32_t target = (int32_t)raw << SPEED_FILTER_SHIFT;
+    /* Multiplication is defined for negative speeds; signed left shift is not. */
+    int32_t target = (int32_t)raw * (int32_t)(1UL << SPEED_FILTER_SHIFT);
 
     *state += (target - *state) >> SPEED_FILTER_SHIFT;
     return Speed_FilterToInt(*state);
@@ -35,8 +39,20 @@ void Timer_ResetSpeedFilter(void)
     SpeedFiltR = 0;
 }
 
+void Timer_NotifyMainAlive(void)
+{
+    main_heartbeat_ticks = 0U;
+}
+
+uint8_t Timer_WasSafetyStop(void)
+{
+    return safety_stop_latched;
+}
+
 void Timer_Init(void)
 {
+    main_heartbeat_ticks = 0U;
+    safety_stop_latched = 0U;
     NVIC_ClearPendingIRQ(TIMER_0_INST_INT_IRQN);
     NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);
 }
@@ -49,15 +65,22 @@ void TIMER_0_INST_IRQHandler(void)
             SpeedL = Encoder_Get_L();
             SpeedR = Encoder_Get_R();
             if (!speed_filter_ready) {
-                speed_filter_l = (int32_t)SpeedL << SPEED_FILTER_SHIFT;
-                speed_filter_r = (int32_t)SpeedR << SPEED_FILTER_SHIFT;
+                speed_filter_l = (int32_t)SpeedL * (int32_t)(1UL << SPEED_FILTER_SHIFT);
+                speed_filter_r = (int32_t)SpeedR * (int32_t)(1UL << SPEED_FILTER_SHIFT);
                 speed_filter_ready = 1U;
             }
             SpeedFiltL = Speed_FilterUpdate(&speed_filter_l, SpeedL);
             SpeedFiltR = Speed_FilterUpdate(&speed_filter_r, SpeedR);
-            if (g_Run) {
+            if (g_Run && (main_heartbeat_ticks >= MAIN_HEARTBEAT_TIMEOUT_TICKS)) {
+                g_Run = 0U;
+                safety_stop_latched = 1U;
+                Motor_SetTargets(0, 0);
+                Motor_Control_Stop();
+            } else if (g_Run) {
+                main_heartbeat_ticks++;
                 Motor_Control_Update(SpeedL, SpeedR);
             } else {
+                main_heartbeat_ticks = 0U;
                 Motor_Control_Stop();
             }
             if (g_SampleTicks < 10U) {

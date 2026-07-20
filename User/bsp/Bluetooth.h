@@ -14,5 +14,8 @@ uint8_t Bluetooth_RingBuf_Get(void);
 uint8_t Bluetooth_RingBuf_IsEmpty(void);
 uint32_t Bluetooth_GetRxCount(void);
 uint32_t Bluetooth_GetIrqCount(void);
+/* Number of bytes discarded because the corresponding ring was full since init. */
+uint32_t Bluetooth_GetRxOverflowCount(void);
+uint32_t Bluetooth_GetTxOverflowCount(void);
 
 #endif

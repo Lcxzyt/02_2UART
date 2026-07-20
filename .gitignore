@@ -1,5 +1,11 @@
-# CCS / Eclipse build output
-Debug/
+# CCS / Eclipse build output. Keep generated build scripts so a pull can build
+# immediately; binaries, dependencies and reports remain ignored below.
+Debug/**
+!Debug/
+!Debug/**/
+!Debug/makefile
+!Debug/*.mk
+!Debug/**/*.mk
 Release/
 
 # Object and generated build files
@@ -16,7 +22,13 @@ Release/
 
 # Local agent/editor scratch data
 .claude/
+.agents/
 .codex_backup_*/
+.codex_backups/
+
+# Regenerable reports and logs
+build.log
+README.html
 
 # OS/editor noise
 .DS_Store

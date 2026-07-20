@@ -3,6 +3,8 @@
 #include "Encoder.h"
 #include "Bluetooth.h"
 #include "IMUTest.h"
+#include "IMU.h"
+#include "Heading.h"
 #include "LineFollow.h"
 #include "HeadingDrive.h"
 #include "TaskController.h"
@@ -10,6 +12,8 @@
 #include "Serial.h"
 #include "Tracking.h"
 #include "Timer.h"
+#include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
 
 #define Cmd_Printf(...) do { Serial_Printf(__VA_ARGS__); Bluetooth_Printf(__VA_ARGS__); } while (0)
@@ -69,6 +73,7 @@ static uint8_t mag_auto_cal_target = STREAM_TARGET_NONE;
 static uint8_t mag_auto_cal_fail_count;
 
 static void CmdDispatch_CancelMagAutoCal(uint8_t source);
+static void CmdDispatch_StopAllMotion(void);
 
 static int32_t Float_ToInt(float value)
 {
@@ -93,11 +98,45 @@ static uint8_t Cmd_UpdateIrBitsFromTrack(const Tracking_Data *track)
     return cmd_ir_bits;
 }
 
-static int16_t Clamp_Target(int16_t target)
+static uint8_t Parse_LongValue(const char *text, long *value)
 {
-    if (target > TARGET_MAX_COUNTS_20MS) return TARGET_MAX_COUNTS_20MS;
-    if (target < -TARGET_MAX_COUNTS_20MS) return -TARGET_MAX_COUNTS_20MS;
-    return target;
+    char *end;
+    long parsed;
+
+    if ((text == 0) || (value == 0) || (*text == '\0')) return 0U;
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if ((end == text) || (errno == ERANGE)) return 0U;
+    while (isspace((unsigned char)*end)) end++;
+    if (*end != '\0') return 0U;
+    *value = parsed;
+    return 1U;
+}
+
+static uint8_t Parse_TargetValue(const char *text, int16_t *value)
+{
+    long parsed;
+
+    if (!Parse_LongValue(text, &parsed)) return 0U;
+    if (parsed > TARGET_MAX_COUNTS_20MS) parsed = TARGET_MAX_COUNTS_20MS;
+    if (parsed < -TARGET_MAX_COUNTS_20MS) parsed = -TARGET_MAX_COUNTS_20MS;
+    *value = (int16_t)parsed;
+    return 1U;
+}
+
+static uint8_t Parse_GainValue(const char *text, float *value)
+{
+    char *end;
+    float parsed;
+
+    if ((text == 0) || (value == 0) || (*text == '\0')) return 0U;
+    errno = 0;
+    parsed = strtof(text, &end);
+    if ((end == text) || (errno == ERANGE)) return 0U;
+    while (isspace((unsigned char)*end)) end++;
+    if ((*end != '\0') || (!(parsed >= 0.0f && parsed <= 100.0f))) return 0U;
+    *value = parsed;
+    return 1U;
 }
 
 static void Apply_Targets(void)
@@ -114,8 +153,32 @@ static void Apply_Targets(void)
         return;
     }
 
-    Motor_SetTarget_L(cmd_target_l);
-    Motor_SetTarget_R(cmd_target_r);
+    Motor_SetTargets(cmd_target_l, cmd_target_r);
+}
+
+/*
+ * Centralise the safety-stop sequence so every command path clears the task
+ * owner, controller modes, stored targets, and physical output consistently.
+ */
+static void CmdDispatch_StopAllMotion(void)
+{
+    if (TaskController_IsRunning()) {
+        TaskController_Stop();
+    }
+    if (LineFollow_IsEnabled()) {
+        LineFollow_Stop();
+    }
+    if (HeadingDrive_IsEnabled()) {
+        HeadingDrive_Stop();
+    }
+    Motor_OpenLoop_Stop();
+    cmd_target_l = 0;
+    cmd_target_r = 0;
+    g_Cmd = 0x30;
+    g_Run = 0U;
+    Motor_SetTargets(0, 0);
+    Motor_Control_Stop();
+    Timer_ResetSpeedFilter();
 }
 
 static void Print_Gain(uint8_t target, char *name, float v)
@@ -138,8 +201,9 @@ static void Print_Params(uint8_t target)
     IMUTest_GetLast(&imu);
 
     Param_Printf(target,
-        "STAT Run=%u V=%u IR=%u IMU=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu\r\n",
+        "STAT Run=%u Safe=%u V=%u IR=%u IMU=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu Drop=SRX:%lu,STX:%lu,BRX:%lu,BTX:%lu\r\n",
         (unsigned int)g_Run,
+        (unsigned int)Timer_WasSafetyStop(),
         (unsigned int)g_Stream,
         (unsigned int)g_IrStream,
         (unsigned int)g_ImuStream,
@@ -152,7 +216,11 @@ static void Print_Params(uint8_t target)
         (int)Motor_GetPwm_L(),
         (int)Motor_GetPwm_R(),
         (unsigned long)Bluetooth_GetRxCount(),
-        (unsigned long)Bluetooth_GetIrqCount());
+        (unsigned long)Bluetooth_GetIrqCount(),
+        (unsigned long)Serial_GetRxOverflowCount(),
+        (unsigned long)Serial_GetTxOverflowCount(),
+        (unsigned long)Bluetooth_GetRxOverflowCount(),
+        (unsigned long)Bluetooth_GetTxOverflowCount());
 
     Param_Printf(target, "GAIN ");
     Print_Gain(target, "Kp", kp);
@@ -196,6 +264,9 @@ static uint8_t Is_LineCmd(uint8_t c)
             c == 'r' || c == 'R' || c == 'u' || c == 'U' ||
             c == 'q' || c == 'Q' || c == 'w' || c == 'W' ||
             c == 'e' || c == 'E' ||
+            c == 'j' || c == 'J' || c == 'k' || c == 'K' ||
+            c == 'n' || c == 'N' || c == 'g' || c == 'G' ||
+            c == 'z' || c == 'Z' ||
             c == 'h' || c == 'H' ||
             c == 'o' || c == 'O' ||
             c == 'a' || c == 'A');
@@ -205,6 +276,7 @@ static void Parse_TuneLine(char *line, uint8_t source)
 {
     float kp, ki, kd;
     float lkp, lki, lkd;
+    float hkp, hki, hkd;
     int16_t value;
     char c = line[0];
     if (c >= 'A' && c <= 'Z') c += 32;
@@ -217,47 +289,112 @@ static void Parse_TuneLine(char *line, uint8_t source)
 
     Motor_PID_GetTunings(&kp, &ki, &kd);
     LineFollow_GetTunings(&lkp, &lki, &lkd);
-    value = Clamp_Target((int16_t)atoi(line + 1));
-
+    HeadingDrive_GetTunings(&hkp, &hki, &hkd);
     switch (c) {
         case 'p':
-            kp = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &kp)) {
+                Param_Printf(source, "ERR p gain must be 0..100\r\n");
+                return;
+            }
             Motor_PID_SetTunings(kp, ki, kd);
             break;
         case 'i':
-            ki = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &ki)) {
+                Param_Printf(source, "ERR i gain must be 0..100\r\n");
+                return;
+            }
             Motor_PID_SetTunings(kp, ki, kd);
             break;
         case 'd':
-            kd = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &kd)) {
+                Param_Printf(source, "ERR d gain must be 0..100\r\n");
+                return;
+            }
             Motor_PID_SetTunings(kp, ki, kd);
             break;
         case 'q':
-            lkp = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &lkp)) {
+                Param_Printf(source, "ERR q gain must be 0..100\r\n");
+                return;
+            }
             LineFollow_SetTunings(lkp, lki, lkd);
             break;
         case 'w':
-            lki = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &lki)) {
+                Param_Printf(source, "ERR w gain must be 0..100\r\n");
+                return;
+            }
             LineFollow_SetTunings(lkp, lki, lkd);
             break;
         case 'e':
-            lkd = (float)atof(line + 1);
+            if (!Parse_GainValue(line + 1, &lkd)) {
+                Param_Printf(source, "ERR e gain must be 0..100\r\n");
+                return;
+            }
             LineFollow_SetTunings(lkp, lki, lkd);
+            break;
+        case 'j':
+            if (!Parse_GainValue(line + 1, &hkp)) {
+                Param_Printf(source, "ERR j gain must be 0..100\r\n");
+                return;
+            }
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'k':
+            if (!Parse_GainValue(line + 1, &hki)) {
+                Param_Printf(source, "ERR k gain must be 0..100\r\n");
+                return;
+            }
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'n':
+            if (!Parse_GainValue(line + 1, &hkd)) {
+                Param_Printf(source, "ERR n gain must be 0..100\r\n");
+                return;
+            }
+            HeadingDrive_SetTunings(hkp, hki, hkd);
+            break;
+        case 'g':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR diff limit must be an integer\r\n");
+                return;
+            }
+            HeadingDrive_SetDiffLimit(value);
+            break;
+        case 'z':
+            if ((!Parse_TargetValue(line + 1, &value)) ||
+                ((value != -1) && (value != 1))) {
+                Param_Printf(source, "ERR output sign must be -1 or 1\r\n");
+                return;
+            }
+            HeadingDrive_SetOutputSign((int8_t)value);
             break;
         case 't':
         case 'b':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR speed must be an integer\r\n");
+                return;
+            }
             cmd_target_l = value;
             cmd_target_r = value;
             g_Run = (value != 0) ? 1U : 0U;
             Apply_Targets();
             break;
         case 'l':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR speed must be an integer\r\n");
+                return;
+            }
             cmd_target_l = value;
             cmd_target_r = 0;
             g_Run = (value != 0) ? 1U : 0U;
             Apply_Targets();
             break;
         case 'r':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR speed must be an integer\r\n");
+                return;
+            }
             cmd_target_l = 0;
             cmd_target_r = value;
             g_Run = (value != 0) ? 1U : 0U;
@@ -269,6 +406,8 @@ static void Parse_TuneLine(char *line, uint8_t source)
                 g_Run = 0U;
                 Param_Printf(source, "HD stop\r\n");
             } else if (line[1] == 'i' || line[1] == 'I') {
+                /* First-time heading calibration blocks; never run it on live motors. */
+                CmdDispatch_StopAllMotion();
                 if (!HeadingDrive_CaptureTarget()) {
                     Param_Printf(source, "HD target update fail: IMU not ready\r\n");
                 } else {
@@ -278,7 +417,11 @@ static void Parse_TuneLine(char *line, uint8_t source)
             } else {
                 const char *speed_arg = &line[1];
                 if (*speed_arg != '\0') {
-                    int16_t hd_speed = Clamp_Target((int16_t)atoi(speed_arg));
+                    int16_t hd_speed;
+                    if (!Parse_TargetValue(speed_arg, &hd_speed)) {
+                        Param_Printf(source, "ERR heading speed must be an integer\r\n");
+                        return;
+                    }
                     if (hd_speed < 0) hd_speed = (int16_t)-hd_speed;
                     HeadingDrive_SetBaseSpeed(hd_speed);
                 }
@@ -305,6 +448,10 @@ static void Parse_TuneLine(char *line, uint8_t source)
             }
             break;
         case 'o':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR pwm must be an integer\r\n");
+                return;
+            }
             if (LineFollow_IsEnabled()) {
                 LineFollow_Stop();
             }
@@ -320,9 +467,18 @@ static void Parse_TuneLine(char *line, uint8_t source)
             }
             break;
         case 'u':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR base speed must be an integer\r\n");
+                return;
+            }
             LineFollow_SetBaseSpeed(value);
+            HeadingDrive_SetBaseSpeed(value);
             break;
         case 'a':
+            if (!Parse_TargetValue(line + 1, &value)) {
+                Param_Printf(source, "ERR mode must be 0 or 1\r\n");
+                return;
+            }
             /* A0 = IDLE, A1 = AutoTrack */
             if (value >= 0 && value <= 1) {
                 TaskController_Start((TaskMode)value);
@@ -376,8 +532,7 @@ static void CmdDispatch_StopMagAutoCalMotor(void)
     cmd_target_l = 0;
     cmd_target_r = 0;
     g_Run = 0U;
-    Motor_SetTarget_L(0);
-    Motor_SetTarget_R(0);
+    Motor_SetTargets(0, 0);
     Motor_Control_Stop();
     Timer_ResetSpeedFilter();
 }
@@ -458,8 +613,7 @@ static void CmdDispatch_StartMagAutoCal(uint8_t source)
     g_Run = 1U;
     cmd_target_l = MAG_AUTO_CAL_SPEED;
     cmd_target_r = (int16_t)-MAG_AUTO_CAL_SPEED;
-    Motor_SetTarget_L(cmd_target_l);
-    Motor_SetTarget_R(cmd_target_r);
+    Motor_SetTargets(cmd_target_l, cmd_target_r);
     Param_Printf(source, "MCal START %us TL=%d TR=%d rotate in place\r\n",
                (unsigned int)(MAG_AUTO_CAL_TICKS / 50U),
                (int)cmd_target_l,
@@ -520,9 +674,9 @@ void CmdDispatch_PrintMagCal(uint8_t target)
     int16_t mx, my, mz;
 
     if (!IMUTest_ReadMagRaw(&mx, &my, &mz)) {
-        mx = 0;
-        my = 0;
-        mz = 0;
+        /* Do not contaminate calibration extrema with synthetic zero samples. */
+        Param_Printf(target, "MAG,ERR\r\n");
+        return;
     }
     CmdDispatch_UpdateMagCalBounds(mx, my, mz);
 
@@ -580,52 +734,152 @@ void CmdDispatch_PrintTracking(uint8_t target)
 void CmdDispatch_PrintImu(uint8_t target)
 {
     IMUTest_Data imu;
-    bool ok = IMUTest_Read(&imu);
+    const Heading_Data *heading = Heading_GetData();
 
-    /* IMU,ok,ax,ay,az,gx,gy,gz,mx,my,mz,roll,pitch,yaw,mpuOk,magOk */
-    Param_Printf(target,
-                 "IMU,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u\r\n",
-                 ok ? 1U : 0U,
-                 (int)imu.AccelX,
-                 (int)imu.AccelY,
-                 (int)imu.AccelZ,
-                 (int)imu.GyroX,
-                 (int)imu.GyroY,
-                 (int)imu.GyroZ,
-                 (int)imu.MagX,
-                 (int)imu.MagY,
-                 (int)imu.MagZ,
-                 (int)imu.RollDeg,
-                 (int)imu.PitchDeg,
-                 (int)imu.YawDeg,
-                 (unsigned int)imu.MpuOk,
-                 (unsigned int)imu.MagOk);
+    if (heading->gyro_calibrated) {
+        IMU_Sample sample;
+        if (IMU_GetLastSample(&sample)) {
+            int gz100 = (int)((heading->gyro_z_dps >= 0.0f) ?
+                              (heading->gyro_z_dps * 100.0f + 0.5f) :
+                              (heading->gyro_z_dps * 100.0f - 0.5f));
+            int bias100 = (int)((heading->gyro_bias_z_dps >= 0.0f) ?
+                                (heading->gyro_bias_z_dps * 100.0f + 0.5f) :
+                                (heading->gyro_bias_z_dps * 100.0f - 0.5f));
+            int mx100 = (int)((sample.Scaled.MagX >= 0.0f) ?
+                              (sample.Scaled.MagX * 100.0f + 0.5f) :
+                              (sample.Scaled.MagX * 100.0f - 0.5f));
+            int my100 = (int)((sample.Scaled.MagY >= 0.0f) ?
+                              (sample.Scaled.MagY * 100.0f + 0.5f) :
+                              (sample.Scaled.MagY * 100.0f - 0.5f));
+            int mz100 = (int)((sample.Scaled.MagZ >= 0.0f) ?
+                              (sample.Scaled.MagZ * 100.0f + 0.5f) :
+                              (sample.Scaled.MagZ * 100.0f - 0.5f));
+            int norm100 = (int)(heading->mag_norm_uT * 100.0f + 0.5f);
+            int roll100 = (int)((heading->roll_deg >= 0.0f) ?
+                                (heading->roll_deg * 100.0f + 0.5f) :
+                                (heading->roll_deg * 100.0f - 0.5f));
+            int pitch100 = (int)((heading->pitch_deg >= 0.0f) ?
+                                 (heading->pitch_deg * 100.0f + 0.5f) :
+                                 (heading->pitch_deg * 100.0f - 0.5f));
+            int mag_yaw100 = (int)(heading->yaw_mag_deg * 100.0f + 0.5f);
+            int fused_yaw100 = (int)(heading->yaw_fused_deg * 100.0f + 0.5f);
+            float target_yaw = HeadingDrive_GetTargetYawF();
+            float error = Heading_AngleDiffDegF(target_yaw,
+                                                 heading->yaw_fused_deg);
+            int target100 = (int)(target_yaw * 100.0f + 0.5f);
+            int error100 = (int)((error >= 0.0f) ?
+                                 (error * 100.0f + 0.5f) :
+                                 (error * 100.0f - 0.5f));
+
+            /* Values ending in 100 are fixed-point values scaled by 100. */
+            Param_Printf(target,
+                "HDG,%u,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%d\r\n",
+                (unsigned int)sample.MpuValid,
+                (unsigned int)sample.MagReadValid,
+                (unsigned int)sample.MagReady,
+                (unsigned int)sample.MagOverflow,
+                (int)sample.Raw.GyroZ,
+                gz100,
+                bias100,
+                mx100,
+                my100,
+                mz100,
+                norm100,
+                roll100,
+                pitch100,
+                (unsigned int)heading->mag_valid,
+                (unsigned int)heading->mag_disturbed,
+                mag_yaw100,
+                fused_yaw100,
+                target100,
+                error100,
+                (int)Motor_GetActual_L(),
+                (int)Motor_GetActual_R());
+            return;
+        }
+    }
+
+    {
+        bool ok = IMUTest_Read(&imu);
+
+        /* IMU,ok,ax,ay,az,gx,gy,gz,mx,my,mz,roll,pitch,yaw,mpuOk,magOk */
+        Param_Printf(target,
+                     "IMU,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u\r\n",
+                     ok ? 1U : 0U,
+                     (int)imu.AccelX,
+                     (int)imu.AccelY,
+                     (int)imu.AccelZ,
+                     (int)imu.GyroX,
+                     (int)imu.GyroY,
+                     (int)imu.GyroZ,
+                     (int)imu.MagX,
+                     (int)imu.MagY,
+                     (int)imu.MagZ,
+                     (int)imu.RollDeg,
+                     (int)imu.PitchDeg,
+                     (int)imu.YawDeg,
+                     (unsigned int)imu.MpuOk,
+                     (unsigned int)imu.MagOk);
+    }
 }
 #define LINE_BUF_SIZE 64U
+#define LINE_PARSER_COUNT 3U
 
-static char tune_line[LINE_BUF_SIZE];
-static uint8_t tune_len = 0;
-static uint8_t tune_active = 0;
-static uint8_t tune_source = STREAM_TARGET_NONE;
+typedef struct {
+    char line[LINE_BUF_SIZE];
+    uint8_t len;
+    uint8_t active;
+} CmdLineParser;
+
+/* Indexes match STREAM_TARGET_*; serial and Bluetooth must never share a frame. */
+static CmdLineParser line_parsers[LINE_PARSER_COUNT];
+
+static CmdLineParser *CmdDispatch_GetLineParser(uint8_t source)
+{
+    if ((source != STREAM_TARGET_SERIAL) &&
+        (source != STREAM_TARGET_BLUETOOTH)) {
+        return 0;
+    }
+    return &line_parsers[source];
+}
+
+static void CmdDispatch_ResetLineParsers(void)
+{
+    uint8_t i;
+
+    for (i = 0U; i < LINE_PARSER_COUNT; i++) {
+        line_parsers[i].len = 0U;
+        line_parsers[i].active = 0U;
+    }
+}
+
+static void CmdDispatch_EmergencyStop(uint8_t source)
+{
+    /* '!' and s/S bypass every parser state, including a truncated line. */
+    CmdDispatch_ResetLineParsers();
+    if (g_MagAutoCal) {
+        CmdDispatch_CancelMagAutoCal(source);
+    }
+    CmdDispatch_StopAllMotion();
+    Param_Printf(source, "STOP\r\n");
+    Print_Params(source);
+}
 
 static void Dispatch_Immediate(uint8_t ch, uint8_t source)
 {
-    /* 自动模式运行中：拒绝开关类命令 (0/1/f)，允许状态流命令 */
+    /* A stop command always outranks task ownership and normal command guards. */
+    if (ch == '0' || ch == 's' || ch == 'S' || ch == '!') {
+        CmdDispatch_EmergencyStop(source);
+        return;
+    }
+
+    /* 自动模式运行中：拒绝会抢占控制权的命令，允许状态流命令。 */
     if (TaskController_IsRunning() &&
-        (ch == '0' || ch == '1' || ch == 's' || ch == 'S' ||
-         ch == 'f' || ch == 'F')) {
+        (ch == '1' || ch == 'f' || ch == 'F')) {
         Param_Printf(source, "BUSY: TaskController running, send A0 first\r\n");
         return;
     }
-    if (ch == '0' || ch == 's' || ch == 'S') {
-        if (g_MagAutoCal) {
-            CmdDispatch_CancelMagAutoCal(source);
-        }
-        g_Cmd = 0x30;
-        g_Run = 0U;
-        Apply_Targets();
-        Print_Params(source);
-    } else if (ch == '1') {
+    if (ch == '1') {
         g_Cmd = 0x31;
         if (LineFollow_IsEnabled()) {
             LineFollow_Stop();
@@ -725,28 +979,36 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
 
 static void Dispatch_Byte(uint8_t ch, uint8_t source)
 {
-    if (tune_active) {
+    CmdLineParser *parser = CmdDispatch_GetLineParser(source);
+
+    /* These bytes are unambiguous and remain available after a broken frame. */
+    if (ch == '!' || ch == 's' || ch == 'S') {
+        CmdDispatch_EmergencyStop(source);
+        return;
+    }
+    if (parser == 0) return;
+
+    if (parser->active) {
         if (ch == '\n' || ch == '\r') {
-            tune_line[tune_len] = '\0';
-            if (tune_len > 0U) Parse_TuneLine(tune_line, tune_source);
-            tune_len = 0U;
-            tune_active = 0U;
-            tune_source = STREAM_TARGET_NONE;
-        } else if (tune_len < (LINE_BUF_SIZE - 1U)) {
-            tune_line[tune_len++] = (char)ch;
+            parser->line[parser->len] = '\0';
+            if (parser->len > 0U) Parse_TuneLine(parser->line, source);
+            parser->len = 0U;
+            parser->active = 0U;
+        } else if (parser->len < (LINE_BUF_SIZE - 1U)) {
+            parser->line[parser->len++] = (char)ch;
         } else {
-            tune_len = 0U;
-            tune_active = 0U;
-            tune_source = STREAM_TARGET_NONE;
+            /* Discard the whole oversized frame instead of executing a prefix. */
+            parser->len = 0U;
+            parser->active = 0U;
+            Param_Printf(source, "ERR command too long\r\n");
         }
         return;
     }
 
     if (Is_LineCmd(ch)) {
-        tune_len = 0U;
-        tune_line[tune_len++] = (char)ch;
-        tune_active = 1U;
-        tune_source = source;
+        parser->len = 0U;
+        parser->line[parser->len++] = (char)ch;
+        parser->active = 1U;
         return;
     }
 

@@ -11,6 +11,8 @@
 #define LF_KD_DEFAULT 0.019f
 #define LF_DIFF_LIMIT_DEFAULT 60
 #define LF_INTEGRAL_LIMIT 4000L
+#define LF_LOST_RECOVER_TICKS 10U
+#define LF_BLACK_SLOW_TICKS 10U
 
 #define LF_DIR_NONE  0
 #define LF_DIR_LEFT -1
@@ -28,6 +30,8 @@ static int16_t lf_last_diff;
 static float lf_kp;
 static float lf_ki;
 static float lf_kd;
+static uint8_t lf_lost_ticks;
+static uint8_t lf_black_ticks;
 
 static int16_t Clamp_Int16(int16_t value, int16_t min, int16_t max)
 {
@@ -73,8 +77,7 @@ static int16_t LineFollow_RoundFloat(float value)
 
 static void LineFollow_SetTargets(int16_t left, int16_t right)
 {
-    Motor_SetTarget_L(Clamp_Target(left));
-    Motor_SetTarget_R(Clamp_Target(right));
+    Motor_SetTargets(Clamp_Target(left), Clamp_Target(right));
 }
 
 static void LineFollow_ResetState(void)
@@ -85,6 +88,8 @@ static void LineFollow_ResetState(void)
     lf_ir_bits = 0U;
     lf_pattern = 0U;
     lf_turn_lock = LF_DIR_NONE;
+    lf_lost_ticks = 0U;
+    lf_black_ticks = 0U;
 }
 
 static uint8_t LineFollow_UpdateBits(const Tracking_Data *track)
@@ -124,10 +129,31 @@ static void LineFollow_RecoverLost(void)
     lf_integral = 0;
     lf_last_diff = (direction < 0) ? (int16_t)(-diff) : diff;
 
-    if (direction < 0) {
-        LineFollow_SetTargets((int16_t)(base - diff), (int16_t)(base + diff));
+    if (lf_lost_ticks < LF_LOST_RECOVER_TICKS) {
+        lf_lost_ticks++;
+        if (direction < 0) {
+            LineFollow_SetTargets((int16_t)(base - diff), (int16_t)(base + diff));
+        } else {
+            LineFollow_SetTargets((int16_t)(base + diff), (int16_t)(base - diff));
+        }
     } else {
-        LineFollow_SetTargets((int16_t)(base + diff), (int16_t)(base - diff));
+        lf_state = LF_STATE_LOST;
+        LineFollow_SetTargets(0, 0);
+    }
+}
+
+static void LineFollow_HandleBlack(void)
+{
+    int16_t slow = (int16_t)(LineFollow_BaseSpeed() / 2);
+
+    lf_state = LF_STATE_BLACK;
+    lf_integral = 0;
+    lf_last_diff = 0;
+    if (lf_black_ticks < LF_BLACK_SLOW_TICKS) {
+        lf_black_ticks++;
+        LineFollow_SetTargets(slow, slow);
+    } else {
+        LineFollow_SetTargets(0, 0);
     }
 }
 
@@ -238,10 +264,19 @@ void LineFollow_UpdateWithTrack(const Tracking_Data *track)
     bits = LineFollow_UpdateBits(track);
 
     if (bits == 0U) {
+        lf_black_ticks = 0U;
         LineFollow_RecoverLost();
         return;
     }
 
+    if (bits == TRACK_ACTIVE_MASK) {
+        lf_lost_ticks = 0U;
+        LineFollow_HandleBlack();
+        return;
+    }
+
+    lf_lost_ticks = 0U;
+    lf_black_ticks = 0U;
     LineFollow_TrackPid(track, bits);
 }
 

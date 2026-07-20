@@ -7,7 +7,7 @@
  * IMU 模块 — MPU6050 + QMC5883P 姿态解算与卡尔曼滤波
  *
  * 硬件层: MPU6050（6 轴 IMU）、QMC5883P（3 轴磁力计）
- * 传输层: MyI2C（软件 I2C, PB10=SCL, PB11=SDA）
+ * 传输层: MyI2C（硬件 I2C0, PA1=SCL, PA0=SDA）
  *
  * 职责:
  *   1. 封装传感器初始化、原始数据读取
@@ -33,6 +33,16 @@ typedef struct {
     float MagX,   MagY,   MagZ;        // 磁场强度  μT
     float Temp;                        // 芯片温度  °C (MPU6050)
 } IMU_ScaledData;
+
+/** 同一采样时刻的原始值、物理量和有效性状态。 */
+typedef struct {
+    IMU_RawData Raw;
+    IMU_ScaledData Scaled;
+    uint8_t MpuValid;
+    uint8_t MagReadValid;
+    uint8_t MagReady;
+    uint8_t MagOverflow;
+} IMU_Sample;
 
 /** 欧拉角 */
 typedef struct {
@@ -117,10 +127,16 @@ void IMU_GetInfo(char *buf, uint16_t len);
 /* —————— 数据采集 —————— */
 
 /** 读取所有传感器原始 ADC 值 */
-void IMU_ReadRaw(IMU_RawData *raw);
+uint8_t IMU_ReadRaw(IMU_RawData *raw);
 
 /** 读取并转换为物理量 */
-void IMU_ReadScaled(IMU_ScaledData *sc);
+uint8_t IMU_ReadScaled(IMU_ScaledData *sc);
+
+/** 单次读取并生成同一帧原始值、物理量及状态；返回1表示MPU帧有效。 */
+uint8_t IMU_ReadSample(IMU_Sample *sample);
+
+/** 获取最近一次采样缓存，不发起新的I2C通信。 */
+uint8_t IMU_GetLastSample(IMU_Sample *sample);
 
 /* —————— 角度解算（无滤波） —————— */
 
@@ -209,6 +225,14 @@ void IMU_SetMagOffsets(float ox, float oy, float oz);
 
 /** 获取当前硬铁偏移量 */
 void IMU_GetMagOffsets(float *ox, float *oy, float *oz);
+
+/** 设置QMC原生XY平面的硬铁偏移(μT)和2x2软铁补偿矩阵 */
+void IMU_SetMagCalibration2D(float ox, float oy,
+                             float m00, float m01, float m10, float m11);
+
+/** 获取QMC原生XY平面的硬铁偏移(μT)和2x2软铁补偿矩阵 */
+void IMU_GetMagCalibration2D(float *ox, float *oy,
+                             float *m00, float *m01, float *m10, float *m11);
 
 /* —————— 便捷接口（供上层直接获取 Yaw） —————— */
 

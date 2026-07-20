@@ -18,26 +18,31 @@
 /* ══════════════════════════════════════════
    传感器量程与标度因子
    ══════════════════════════════════════════ */
-#define GYRO_SCALE       (1.0f / 16.4f)        /* (°/s) / LSB */
-#define ACCEL_SCALE      (9.80665f / 16384.0f) /* (m/s²) / LSB */
-#define MAG_SCALE        (100.0f / 3000.0f)    /* μT / LSB */
+#define GYRO_SCALE       (1.0f / MPU6050_GYRO_LSB_PER_DPS)
+#define ACCEL_SCALE      (9.80665f / MPU6050_ACCEL_LSB_PER_G)
+#define MAG_SCALE        (100.0f / 3750.0f)    /* QMC5883P ±8G: μT / LSB */
 
 /* ══════════════════════════════════════════
    内部静态变量
    ══════════════════════════════════════════ */
 static uint8_t imu_mpu_id   = 0U;
 static uint8_t imu_mag_id   = 0U;
-static uint8_t imu_mag_addr = 0x0DU;   /* MSPM0 驱动使用 7-bit 地址；GitHub 0x1A(8-bit) => 0x0D */
+static uint8_t imu_mag_addr = 0x2CU;
 
-/* 磁力计硬铁校准偏移 (μT) — 由 IMU_MagCalibApply() 或 IMU_SetMagOffsets() 设定 */
-static float imu_mag_offset_x = 0.0f;
-static float imu_mag_offset_y = 0.0f;
+/*
+ * 本车水平整圈标定结果（QMC原生坐标系）。
+ * X/Y偏移单位为μT；2x2矩阵用于补偿水平面内的比例差和非正交误差。
+ * Z轴没有在水平旋转中获得充分激励，因此保持0偏移且不参与软铁补偿。
+ */
+static float imu_mag_offset_x = -5.7823f;
+static float imu_mag_offset_y = 33.0860f;
 static float imu_mag_offset_z = 0.0f;
-
-static uint8_t IMU_Addr8ToAddr7(uint8_t addr8)
-{
-    return (uint8_t)(addr8 >> 1);
-}
+static float imu_mag_matrix_00 = 0.980118f;
+static float imu_mag_matrix_01 = 0.011096f;
+static float imu_mag_matrix_10 = 0.011096f;
+static float imu_mag_matrix_11 = 1.020961f;
+static IMU_Sample imu_last_sample;
+static uint8_t imu_last_sample_valid = 0U;
 
 /* ══════════════════════════════════════════
    初始化
@@ -59,35 +64,14 @@ uint8_t IMU_Init(void)
         Delay_ms(50U);
     }
 
-    /* ———— 2. I2C 总线扫描，定位 QMC5883P ———— */
-    /* GitHub 候选 8-bit 地址: 0x1A(7b=0x0D), 0x34(7b=0x1A), 0x58(7b=0x2C) */
+    /* ———— 2. 严格识别 QMC5883P ———— */
+    /* 官方默认7-bit地址为0x2C；保留两个已知兼容模块地址，但必须校验CHIPID。 */
     {
-        const uint8_t candidates8[] = {0x1AU, 0x34U, 0x58U};
+        const uint8_t candidates7[] = {0x2CU, 0x0DU, 0x1AU};
         uint8_t i;
-        for (i = 0U; i < (uint8_t)(sizeof(candidates8) / sizeof(candidates8[0])); i++) {
+        for (i = 0U; i < (uint8_t)(sizeof(candidates7) / sizeof(candidates7[0])); i++) {
             uint8_t id = 0xFFU;
-            uint8_t addr7 = IMU_Addr8ToAddr7(candidates8[i]);
-            if (QMC5883L_ProbeAddr(addr7, &id)) {
-                imu_mag_addr = addr7;
-                found = 1U;
-                break;
-            }
-            Delay_us(50U);
-        }
-    }
-
-    /* 如果候选地址都没找到，尝试全总线扫描 */
-    if (!found) {
-        uint8_t addr7;
-        for (addr7 = 0x01U; addr7 < 0x7FU; addr7++) {
-            uint8_t id = 0xFFU;
-
-            /* 跳过 MPU6050 */
-            if (addr7 == MPU6050_ADDR_7BIT) {
-                continue;
-            }
-
-            /* 尝试读 CHIPID 确认 */
+            uint8_t addr7 = candidates7[i];
             if (QMC5883L_ProbeAddr(addr7, &id) && (id == 0x80U)) {
                 imu_mag_addr = addr7;
                 found = 1U;
@@ -110,6 +94,10 @@ uint8_t IMU_Init(void)
 
     imu_mag_id = QMC5883L_GetID();
 
+    if (imu_mag_id != 0x80U) {
+        return 0U;
+    }
+
     return 1U;   /* 成功 */
 }
 
@@ -130,8 +118,8 @@ void IMU_GetInfo(char *buf, uint16_t len)
     (void)snprintf(buf, len,
                    "MPU6050: WHO_AM_I=0x%02X %s\r\n"
                    "QMC5883P: CHIPID=0x%02X Addr7=0x%02X %s\r\n"
-                   "Config: Gyro=+-2000dps Accel=+-2g Mag=+-8G\r\n"
-                   "Filter: Kalman (dt=0.01s default)\r\n",
+                   "Config: Gyro=+-500dps Accel=+-2g Mag=+-8G\r\n"
+                   "Filter: Roll/Pitch Kalman + GyroZ/Mag heading fusion\r\n",
                    imu_mpu_id,
                    ((imu_mpu_id == 0x68U) || (imu_mpu_id == 0x72U)) ? "OK" : "FAIL",
                    imu_mag_id,
@@ -142,55 +130,95 @@ void IMU_GetInfo(char *buf, uint16_t len)
 /* ══════════════════════════════════════════
    数据采集
    ══════════════════════════════════════════ */
-void IMU_ReadRaw(IMU_RawData *raw)
+static void IMU_ConvertSample(IMU_Sample *sample)
 {
-    if (raw == 0) {
-        return;
-    }
+    float qmc_x;
+    float qmc_y;
+    float qmc_z;
+    float qmc_cal_x;
+    float qmc_cal_y;
 
-    /* 读取 MPU6050 6 轴数据 */
-    MPU6050_GetData(&raw->AccelX, &raw->AccelY, &raw->AccelZ,
-                    &raw->GyroX,  &raw->GyroY,  &raw->GyroZ);
+    sample->Scaled.AccelX = (float)sample->Raw.AccelX * ACCEL_SCALE;
+    sample->Scaled.AccelY = (float)sample->Raw.AccelY * ACCEL_SCALE;
+    sample->Scaled.AccelZ = (float)sample->Raw.AccelZ * ACCEL_SCALE;
 
-    /* 读取 QMC5883P 3 轴数据 */
-    (void)QMC5883L_GetData(&raw->MagX, &raw->MagY, &raw->MagZ);
+    sample->Scaled.GyroX = (float)sample->Raw.GyroX * GYRO_SCALE;
+    sample->Scaled.GyroY = (float)sample->Raw.GyroY * GYRO_SCALE;
+    sample->Scaled.GyroZ = (float)sample->Raw.GyroZ * GYRO_SCALE;
+
+    /* Hard/soft-iron calibration remains expressed in the native QMC sensor frame. */
+    qmc_x = (float)sample->Raw.MagX * MAG_SCALE - imu_mag_offset_x;
+    qmc_y = (float)sample->Raw.MagY * MAG_SCALE - imu_mag_offset_y;
+    qmc_z = (float)sample->Raw.MagZ * MAG_SCALE - imu_mag_offset_z;
+    qmc_cal_x = imu_mag_matrix_00 * qmc_x + imu_mag_matrix_01 * qmc_y;
+    qmc_cal_y = imu_mag_matrix_10 * qmc_x + imu_mag_matrix_11 * qmc_y;
+
+    /* Confirmed board alignment: MPU +X=-QMC Y, +Y=QMC X, +Z=QMC Z. */
+    sample->Scaled.MagX = -qmc_cal_y;
+    sample->Scaled.MagY =  qmc_cal_x;
+    sample->Scaled.MagZ =  qmc_z;
+    sample->Scaled.Temp = 0.0f;
 }
 
-void IMU_ReadScaled(IMU_ScaledData *sc)
+uint8_t IMU_ReadSample(IMU_Sample *sample)
 {
-    int16_t ax, ay, az, gx, gy, gz, mx, my, mz;
-    int16_t temp_raw;
-    uint8_t temp_h;
-    uint8_t temp_l;
+    uint8_t mag_status = 0U;
 
-    if (sc == 0) {
-        return;
-    }
+    if (sample == 0) return 0U;
 
-    /* ———— 读取原始数据 ———— */
-    MPU6050_GetData(&ax, &ay, &az, &gx, &gy, &gz);
-    (void)QMC5883L_GetData(&mx, &my, &mz);
+    sample->Raw.AccelX = 0;
+    sample->Raw.AccelY = 0;
+    sample->Raw.AccelZ = 0;
+    sample->Raw.GyroX = 0;
+    sample->Raw.GyroY = 0;
+    sample->Raw.GyroZ = 0;
+    sample->Raw.MagX = 0;
+    sample->Raw.MagY = 0;
+    sample->Raw.MagZ = 0;
 
-    /* 温度（MPU6050 内部） */
-    temp_h = MPU6050_ReadRegValue(MPU6050_TEMP_OUT_H);
-    temp_l = MPU6050_ReadRegValue(MPU6050_TEMP_OUT_L);
-    temp_raw = (int16_t)(((uint16_t)temp_h << 8) | temp_l);
+    sample->MpuValid = MPU6050_GetData(&sample->Raw.AccelX,
+                                       &sample->Raw.AccelY,
+                                       &sample->Raw.AccelZ,
+                                       &sample->Raw.GyroX,
+                                       &sample->Raw.GyroY,
+                                       &sample->Raw.GyroZ) ? 1U : 0U;
 
-    /* ———— 标度转换 ———— */
-    sc->AccelX = (float)ax * ACCEL_SCALE;
-    sc->AccelY = (float)ay * ACCEL_SCALE;
-    sc->AccelZ = (float)az * ACCEL_SCALE;
+    sample->MagReadValid = QMC5883L_GetDataChecked(&sample->Raw.MagX,
+                                                    &sample->Raw.MagY,
+                                                    &sample->Raw.MagZ,
+                                                    &mag_status) ? 1U : 0U;
+    sample->MagReady = ((mag_status & QMC5883L_SR_DRDY) != 0U) ? 1U : 0U;
+    sample->MagOverflow = ((mag_status & QMC5883L_SR_OVFL) != 0U) ? 1U : 0U;
 
-    sc->GyroX  = (float)gx * GYRO_SCALE;
-    sc->GyroY  = (float)gy * GYRO_SCALE;
-    sc->GyroZ  = (float)gz * GYRO_SCALE;
+    IMU_ConvertSample(sample);
+    imu_last_sample = *sample;
+    imu_last_sample_valid = sample->MpuValid;
+    return sample->MpuValid;
+}
 
-    sc->MagX   = (float)mx * MAG_SCALE - imu_mag_offset_x;
-    sc->MagY   = (float)my * MAG_SCALE - imu_mag_offset_y;
-    sc->MagZ   = (float)mz * MAG_SCALE - imu_mag_offset_z;
+uint8_t IMU_GetLastSample(IMU_Sample *sample)
+{
+    if ((sample == 0) || (!imu_last_sample_valid)) return 0U;
+    *sample = imu_last_sample;
+    return 1U;
+}
 
-    /* MPU6050 温度公式: T = Temp/340 + 36.53 (°C) */
-    sc->Temp   = (float)temp_raw / 340.0f + 36.53f;
+uint8_t IMU_ReadRaw(IMU_RawData *raw)
+{
+    IMU_Sample sample;
+
+    if ((raw == 0) || (!IMU_ReadSample(&sample))) return 0U;
+    *raw = sample.Raw;
+    return sample.MagReadValid;
+}
+
+uint8_t IMU_ReadScaled(IMU_ScaledData *sc)
+{
+    IMU_Sample sample;
+
+    if ((sc == 0) || (!IMU_ReadSample(&sample))) return 0U;
+    *sc = sample.Scaled;
+    return sample.MagReadValid;
 }
 
 /* ══════════════════════════════════════════
@@ -278,7 +306,9 @@ float IMU_GetYaw(void)
     float roll;
     float pitch;
 
-    IMU_ReadScaled(&sc);
+    if (!IMU_ReadScaled(&sc)) {
+        return 0.0f;
+    }
     IMU_AccelToAngles(&sc, &roll, &pitch);
     return IMU_ComputeHeading(&sc, roll, pitch);
 }
@@ -489,4 +519,26 @@ void IMU_GetMagOffsets(float *ox, float *oy, float *oz)
     if (ox) *ox = imu_mag_offset_x;
     if (oy) *oy = imu_mag_offset_y;
     if (oz) *oz = imu_mag_offset_z;
+}
+
+void IMU_SetMagCalibration2D(float ox, float oy,
+                             float m00, float m01, float m10, float m11)
+{
+    imu_mag_offset_x = ox;
+    imu_mag_offset_y = oy;
+    imu_mag_matrix_00 = m00;
+    imu_mag_matrix_01 = m01;
+    imu_mag_matrix_10 = m10;
+    imu_mag_matrix_11 = m11;
+}
+
+void IMU_GetMagCalibration2D(float *ox, float *oy,
+                             float *m00, float *m01, float *m10, float *m11)
+{
+    if (ox)  *ox = imu_mag_offset_x;
+    if (oy)  *oy = imu_mag_offset_y;
+    if (m00) *m00 = imu_mag_matrix_00;
+    if (m01) *m01 = imu_mag_matrix_01;
+    if (m10) *m10 = imu_mag_matrix_10;
+    if (m11) *m11 = imu_mag_matrix_11;
 }

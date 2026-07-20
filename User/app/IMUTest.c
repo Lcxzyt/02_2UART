@@ -8,23 +8,23 @@
 #include <stdio.h>
 
 #define IMU_PRINTF_BUF_SIZE 160U
-#define MAG_SCALE           (100.0f / 3000.0f)
+#define MAG_SCALE           (100.0f / 3750.0f)
 
 static IMUTest_Data imu_last;
 static bool imu_inited = false;
 static bool imu_init_tried = false;
+static char imu_printf_buffer[IMU_PRINTF_BUF_SIZE];
 
 static void IMUTest_Printf(char *format, ...)
 {
-    char buf[IMU_PRINTF_BUF_SIZE];
     va_list arg;
 
     va_start(arg, format);
-    (void)vsnprintf(buf, sizeof(buf), format, arg);
+    (void)vsnprintf(imu_printf_buffer, sizeof(imu_printf_buffer), format, arg);
     va_end(arg);
 
-    Serial_SendString(buf);
-    Bluetooth_SendString(buf);
+    Serial_SendString(imu_printf_buffer);
+    Bluetooth_SendString(imu_printf_buffer);
 }
 
 static int16_t IMUTest_RoundDeg(float value)
@@ -45,6 +45,9 @@ static int16_t IMUTest_RoundNormalizeYaw(float yaw)
 
 bool IMUTest_Init(void)
 {
+    if (imu_inited) return true;
+
+    /* A previous transient I2C failure must not latch the IMU off until reset. */
     imu_init_tried = true;
     imu_inited = (IMU_Init() != 0U);
 
@@ -66,7 +69,11 @@ bool IMUTest_ReadMagRaw(int16_t *magX, int16_t *magY, int16_t *magZ)
         (void)IMUTest_Init();
     }
 
-    IMU_ReadRaw(&raw);
+    if ((!imu_inited) || (!IMU_ReadRaw(&raw))) {
+        imu_last.MpuOk = false;
+        imu_last.MagOk = false;
+        return false;
+    }
 
     if (magX != 0) *magX = raw.MagX;
     if (magY != 0) *magY = raw.MagY;
@@ -75,9 +82,9 @@ bool IMUTest_ReadMagRaw(int16_t *magX, int16_t *magY, int16_t *magZ)
     imu_last.MagX = raw.MagX;
     imu_last.MagY = raw.MagY;
     imu_last.MagZ = raw.MagZ;
-    imu_last.MpuOk = imu_inited;
-    imu_last.MagOk = imu_inited;
-    return imu_inited;
+    imu_last.MpuOk = true;
+    imu_last.MagOk = true;
+    return true;
 }
 
 void IMUTest_SetMagCalibration(float offsetX, float offsetY, float offsetZ,
@@ -110,47 +117,50 @@ void IMUTest_GetMagCalibration(float *offsetX, float *offsetY, float *offsetZ,
 
 bool IMUTest_Read(IMUTest_Data *data)
 {
-    IMU_RawData raw;
-    IMU_ScaledData sc;
+    IMU_Sample sample;
     IMU_Attitude att;
 
     if (!imu_init_tried) {
         (void)IMUTest_Init();
     }
 
-    IMU_ReadRaw(&raw);
-    IMU_ReadScaled(&sc);
-    if (imu_inited) {
-        IMU_GetAttitudeRaw(&sc, &att);
+    if (imu_inited && IMU_ReadSample(&sample) && sample.MagReadValid) {
+        IMU_GetAttitudeRaw(&sample.Scaled, &att);
     } else {
         att.Roll = 0.0f;
         att.Pitch = 0.0f;
         att.Yaw = 0.0f;
+        imu_last.MpuOk = false;
+        imu_last.MagOk = false;
+        if (data != 0) {
+            *data = imu_last;
+        }
+        return false;
     }
 
-    imu_last.AccelX = raw.AccelX;
-    imu_last.AccelY = raw.AccelY;
-    imu_last.AccelZ = raw.AccelZ;
-    imu_last.GyroX = raw.GyroX;
-    imu_last.GyroY = raw.GyroY;
-    imu_last.GyroZ = raw.GyroZ;
-    imu_last.MagX = raw.MagX;
-    imu_last.MagY = raw.MagY;
-    imu_last.MagZ = raw.MagZ;
+    imu_last.AccelX = sample.Raw.AccelX;
+    imu_last.AccelY = sample.Raw.AccelY;
+    imu_last.AccelZ = sample.Raw.AccelZ;
+    imu_last.GyroX = sample.Raw.GyroX;
+    imu_last.GyroY = sample.Raw.GyroY;
+    imu_last.GyroZ = sample.Raw.GyroZ;
+    imu_last.MagX = sample.Raw.MagX;
+    imu_last.MagY = sample.Raw.MagY;
+    imu_last.MagZ = sample.Raw.MagZ;
     imu_last.RollDeg = IMUTest_RoundDeg(att.Roll);
     imu_last.PitchDeg = IMUTest_RoundDeg(att.Pitch);
     imu_last.YawDeg = IMUTest_RoundNormalizeYaw(att.Yaw);
     imu_last.MpuId = MPU6050_GetID();
     imu_last.MagAddr = QMC5883L_GetAddr();
     imu_last.MagId = QMC5883L_GetID();
-    imu_last.MpuOk = imu_inited;
-    imu_last.MagOk = imu_inited;
+    imu_last.MpuOk = true;
+    imu_last.MagOk = true;
 
     if (data != 0) {
         *data = imu_last;
     }
 
-    return imu_inited;
+    return true;
 }
 
 bool IMUTest_Print(void)

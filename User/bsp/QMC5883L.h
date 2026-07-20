@@ -14,6 +14,7 @@
 #define QMC5883L_SR                 0x09U
 #define QMC5883L_CR1                0x0AU
 #define QMC5883L_CR2                0x0BU
+#define QMC5883L_AXIS_SIGN          0x29U
 #define QMC5883L_SR_DRDY            (1U << 0)
 #define QMC5883L_SR_OVFL            (1U << 1)
 #define QMC5883L_CR1_OSR2_1         (0U << 6)
@@ -32,6 +33,9 @@ bool    QMC5883L_Init(void);
 uint8_t QMC5883L_GetID(void);
 uint8_t QMC5883L_GetStatus(void);
 uint8_t QMC5883L_IsDataReady(void);
+bool    QMC5883L_ReadStatus(uint8_t *status);
 bool    QMC5883L_GetData(int16_t *magX, int16_t *magY, int16_t *magZ);
+bool    QMC5883L_GetDataChecked(int16_t *magX, int16_t *magY, int16_t *magZ,
+                                uint8_t *status);
 
 #endif
