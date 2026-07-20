@@ -48,7 +48,7 @@ int main(void)
     /* ── 启动信息 ── */
     Stream_Printf("\r\n[CAR] MSPM0 ready UART0=115200 BT=9600 OLED=%s\r\n", oled_ok ? "OK" : "FAIL");
     Stream_Printf("[IO] BT:TX=PA8 RX=PA9 | I2C:SCL=PA1 SDA=PA0 | IR8:OUT=PA16 AD0=PA17 AD1=PB17 AD2=PB18\r\n");
-    Stream_Printf("[CMD] ? stat | t/l/r speed | o pwm | p/i/d motorPID | f line | hi lock, h[spd] go, h0 stop | X/x ir | y/Y imu | M/C mag | A0/A1 task | 0 stop\r\n");
+    Stream_Printf("[CMD] ? stat | t/l/r speed | o pwm | p/i/d motorPID | f line | hi lock, h[spd] go, h0 stop | X/x ir | y/Y imu | M/C mag | A0/A1 task | 0 stop | ! hard-stop\r\n");
     Stream_Printf("[CSV] v=SPD,... | x=IR8,... | y=IMU/HDG,... | C=MAG,...\r\n");
 
     /* ── 主循环 ── */

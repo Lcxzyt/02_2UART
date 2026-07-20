@@ -38,6 +38,21 @@ static volatile int8_t Motor_CurrentPwm[MOTOR_NUM];
 static volatile uint8_t Motor_OpenLoopEnabled;
 static volatile int8_t Motor_OpenLoopPwm;
 
+/* Preserve the caller's interrupt state while updating ISR-owned control data. */
+static uint32_t Motor_EnterCritical(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void Motor_ExitCritical(uint32_t primask)
+{
+    if ((primask & 1U) == 0U) {
+        __enable_irq();
+    }
+}
+
 static int8_t Clamp_Pwm(int16_t pwm)
 {
     if (pwm > 100) return 100;
@@ -158,7 +173,7 @@ static void Motor_SetSpeedRaw(uint8_t id, int8_t speed)
     Motor_WriteCompare(id, duty);
 }
 
-static void Motor_SetTarget(uint8_t id, int16_t target)
+static void Motor_SetTargetUnlocked(uint8_t id, int16_t target)
 {
     if (Motor_OpenLoopEnabled) {
         Motor_OpenLoop_Disable();
@@ -193,18 +208,51 @@ void Motor_Init(void)
     }
 }
 
-void Motor_SetSpeed_L(int8_t Speed) { Motor_SetSpeedRaw(MOTOR_L, Speed); }
-void Motor_SetSpeed_R(int8_t Speed) { Motor_SetSpeedRaw(MOTOR_R, Speed); }
+void Motor_SetSpeed_L(int8_t Speed)
+{
+    uint32_t primask = Motor_EnterCritical();
+    Motor_SetSpeedRaw(MOTOR_L, Speed);
+    Motor_ExitCritical(primask);
+}
+
+void Motor_SetSpeed_R(int8_t Speed)
+{
+    uint32_t primask = Motor_EnterCritical();
+    Motor_SetSpeedRaw(MOTOR_R, Speed);
+    Motor_ExitCritical(primask);
+}
 void Motor_SoftStart_L(int8_t TargetSpeed, uint8_t Step) { (void)Step; Motor_SetSpeed_L(TargetSpeed); }
 void Motor_SoftStart_R(int8_t TargetSpeed, uint8_t Step) { (void)Step; Motor_SetSpeed_R(TargetSpeed); }
 void Motor_SoftStart_Update(void) {}
 
-void Motor_SetTarget_L(int16_t target) { Motor_SetTarget(MOTOR_L, target); }
-void Motor_SetTarget_R(int16_t target) { Motor_SetTarget(MOTOR_R, target); }
+void Motor_SetTarget_L(int16_t target)
+{
+    uint32_t primask = Motor_EnterCritical();
+    Motor_SetTargetUnlocked(MOTOR_L, target);
+    Motor_ExitCritical(primask);
+}
+
+void Motor_SetTarget_R(int16_t target)
+{
+    uint32_t primask = Motor_EnterCritical();
+    Motor_SetTargetUnlocked(MOTOR_R, target);
+    Motor_ExitCritical(primask);
+}
+
+void Motor_SetTargets(int16_t target_l, int16_t target_r)
+{
+    uint32_t primask = Motor_EnterCritical();
+
+    /* Commit both wheel targets as one control update; avoid a one-tick yaw pulse. */
+    Motor_SetTargetUnlocked(MOTOR_L, target_l);
+    Motor_SetTargetUnlocked(MOTOR_R, target_r);
+    Motor_ExitCritical(primask);
+}
 
 void Motor_OpenLoop_Set(int16_t pwm)
 {
     uint8_t i;
+    uint32_t primask;
 
     pwm = Clamp_OpenLoopPwm(pwm);
     if (pwm == 0) {
@@ -212,17 +260,20 @@ void Motor_OpenLoop_Set(int16_t pwm)
         return;
     }
 
+    primask = Motor_EnterCritical();
     Motor_OpenLoopEnabled = 1U;
     Motor_OpenLoopPwm = pwm;
     for (i = 0U; i < MOTOR_NUM; i++) {
         Motor_Target[i] = 0;
         PID_Reset(&Motor_PID[i]);
     }
+    Motor_ExitCritical(primask);
 }
 
 void Motor_OpenLoop_Stop(void)
 {
     uint8_t i;
+    uint32_t primask = Motor_EnterCritical();
 
     Motor_OpenLoopEnabled = 0U;
     Motor_OpenLoopPwm = 0;
@@ -231,6 +282,7 @@ void Motor_OpenLoop_Stop(void)
         PID_Reset(&Motor_PID[i]);
         Motor_SetSpeedRaw(i, 0);
     }
+    Motor_ExitCritical(primask);
 }
 
 uint8_t Motor_OpenLoop_IsEnabled(void) { return Motor_OpenLoopEnabled; }
@@ -240,6 +292,7 @@ int8_t Motor_OpenLoop_GetLimit(void) { return MOTOR_OPEN_LOOP_PWM_LIMIT; }
 void Motor_Control_Stop(void)
 {
     uint8_t i;
+    uint32_t primask = Motor_EnterCritical();
 
     Motor_OpenLoopEnabled = 0U;
     Motor_OpenLoopPwm = 0;
@@ -249,6 +302,7 @@ void Motor_Control_Stop(void)
         PID_Reset(&Motor_PID[i]);
         Motor_SetSpeedRaw(i, 0);
     }
+    Motor_ExitCritical(primask);
 }
 
 void Motor_Control_Update(int16_t measL, int16_t measR)
@@ -297,15 +351,21 @@ void Motor_Control_Update(int16_t measL, int16_t measR)
 
 void Motor_PID_SetTunings(float kp, float ki, float kd)
 {
+    uint32_t primask = Motor_EnterCritical();
+
     PID_SetTunings(&Motor_PID[MOTOR_L], kp, ki, kd);
     PID_SetTunings(&Motor_PID[MOTOR_R], kp, ki, kd);
+    Motor_ExitCritical(primask);
 }
 
 void Motor_PID_GetTunings(float *kp, float *ki, float *kd)
 {
+    uint32_t primask = Motor_EnterCritical();
+
     if (kp) *kp = Motor_PID[MOTOR_L].Kp;
     if (ki) *ki = Motor_PID[MOTOR_L].Ki;
     if (kd) *kd = Motor_PID[MOTOR_L].Kd;
+    Motor_ExitCritical(primask);
 }
 
 int16_t Motor_GetTarget_L(void) { return Motor_Target[MOTOR_L]; }

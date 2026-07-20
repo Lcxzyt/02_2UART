@@ -73,6 +73,7 @@ static uint8_t mag_auto_cal_target = STREAM_TARGET_NONE;
 static uint8_t mag_auto_cal_fail_count;
 
 static void CmdDispatch_CancelMagAutoCal(uint8_t source);
+static void CmdDispatch_StopAllMotion(void);
 
 static int32_t Float_ToInt(float value)
 {
@@ -152,8 +153,32 @@ static void Apply_Targets(void)
         return;
     }
 
-    Motor_SetTarget_L(cmd_target_l);
-    Motor_SetTarget_R(cmd_target_r);
+    Motor_SetTargets(cmd_target_l, cmd_target_r);
+}
+
+/*
+ * Centralise the safety-stop sequence so every command path clears the task
+ * owner, controller modes, stored targets, and physical output consistently.
+ */
+static void CmdDispatch_StopAllMotion(void)
+{
+    if (TaskController_IsRunning()) {
+        TaskController_Stop();
+    }
+    if (LineFollow_IsEnabled()) {
+        LineFollow_Stop();
+    }
+    if (HeadingDrive_IsEnabled()) {
+        HeadingDrive_Stop();
+    }
+    Motor_OpenLoop_Stop();
+    cmd_target_l = 0;
+    cmd_target_r = 0;
+    g_Cmd = 0x30;
+    g_Run = 0U;
+    Motor_SetTargets(0, 0);
+    Motor_Control_Stop();
+    Timer_ResetSpeedFilter();
 }
 
 static void Print_Gain(uint8_t target, char *name, float v)
@@ -176,7 +201,7 @@ static void Print_Params(uint8_t target)
     IMUTest_GetLast(&imu);
 
     Param_Printf(target,
-        "STAT Run=%u Safe=%u V=%u IR=%u IMU=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu\r\n",
+        "STAT Run=%u Safe=%u V=%u IR=%u IMU=%u MC=%u MA=%u TL=%d TR=%d AL=%d AR=%d PL=%d PR=%d BT=%lu/%lu Drop=SRX:%lu,STX:%lu,BRX:%lu,BTX:%lu\r\n",
         (unsigned int)g_Run,
         (unsigned int)Timer_WasSafetyStop(),
         (unsigned int)g_Stream,
@@ -191,7 +216,11 @@ static void Print_Params(uint8_t target)
         (int)Motor_GetPwm_L(),
         (int)Motor_GetPwm_R(),
         (unsigned long)Bluetooth_GetRxCount(),
-        (unsigned long)Bluetooth_GetIrqCount());
+        (unsigned long)Bluetooth_GetIrqCount(),
+        (unsigned long)Serial_GetRxOverflowCount(),
+        (unsigned long)Serial_GetTxOverflowCount(),
+        (unsigned long)Bluetooth_GetRxOverflowCount(),
+        (unsigned long)Bluetooth_GetTxOverflowCount());
 
     Param_Printf(target, "GAIN ");
     Print_Gain(target, "Kp", kp);
@@ -377,6 +406,8 @@ static void Parse_TuneLine(char *line, uint8_t source)
                 g_Run = 0U;
                 Param_Printf(source, "HD stop\r\n");
             } else if (line[1] == 'i' || line[1] == 'I') {
+                /* First-time heading calibration blocks; never run it on live motors. */
+                CmdDispatch_StopAllMotion();
                 if (!HeadingDrive_CaptureTarget()) {
                     Param_Printf(source, "HD target update fail: IMU not ready\r\n");
                 } else {
@@ -501,8 +532,7 @@ static void CmdDispatch_StopMagAutoCalMotor(void)
     cmd_target_l = 0;
     cmd_target_r = 0;
     g_Run = 0U;
-    Motor_SetTarget_L(0);
-    Motor_SetTarget_R(0);
+    Motor_SetTargets(0, 0);
     Motor_Control_Stop();
     Timer_ResetSpeedFilter();
 }
@@ -583,8 +613,7 @@ static void CmdDispatch_StartMagAutoCal(uint8_t source)
     g_Run = 1U;
     cmd_target_l = MAG_AUTO_CAL_SPEED;
     cmd_target_r = (int16_t)-MAG_AUTO_CAL_SPEED;
-    Motor_SetTarget_L(cmd_target_l);
-    Motor_SetTarget_R(cmd_target_r);
+    Motor_SetTargets(cmd_target_l, cmd_target_r);
     Param_Printf(source, "MCal START %us TL=%d TR=%d rotate in place\r\n",
                (unsigned int)(MAG_AUTO_CAL_TICKS / 50U),
                (int)cmd_target_l,
@@ -645,9 +674,9 @@ void CmdDispatch_PrintMagCal(uint8_t target)
     int16_t mx, my, mz;
 
     if (!IMUTest_ReadMagRaw(&mx, &my, &mz)) {
-        mx = 0;
-        my = 0;
-        mz = 0;
+        /* Do not contaminate calibration extrema with synthetic zero samples. */
+        Param_Printf(target, "MAG,ERR\r\n");
+        return;
     }
     CmdDispatch_UpdateMagCalBounds(mx, my, mz);
 
@@ -794,30 +823,63 @@ void CmdDispatch_PrintImu(uint8_t target)
     }
 }
 #define LINE_BUF_SIZE 64U
+#define LINE_PARSER_COUNT 3U
 
-static char tune_line[LINE_BUF_SIZE];
-static uint8_t tune_len = 0;
-static uint8_t tune_active = 0;
-static uint8_t tune_source = STREAM_TARGET_NONE;
+typedef struct {
+    char line[LINE_BUF_SIZE];
+    uint8_t len;
+    uint8_t active;
+} CmdLineParser;
+
+/* Indexes match STREAM_TARGET_*; serial and Bluetooth must never share a frame. */
+static CmdLineParser line_parsers[LINE_PARSER_COUNT];
+
+static CmdLineParser *CmdDispatch_GetLineParser(uint8_t source)
+{
+    if ((source != STREAM_TARGET_SERIAL) &&
+        (source != STREAM_TARGET_BLUETOOTH)) {
+        return 0;
+    }
+    return &line_parsers[source];
+}
+
+static void CmdDispatch_ResetLineParsers(void)
+{
+    uint8_t i;
+
+    for (i = 0U; i < LINE_PARSER_COUNT; i++) {
+        line_parsers[i].len = 0U;
+        line_parsers[i].active = 0U;
+    }
+}
+
+static void CmdDispatch_EmergencyStop(uint8_t source)
+{
+    /* '!' and s/S bypass every parser state, including a truncated line. */
+    CmdDispatch_ResetLineParsers();
+    if (g_MagAutoCal) {
+        CmdDispatch_CancelMagAutoCal(source);
+    }
+    CmdDispatch_StopAllMotion();
+    Param_Printf(source, "STOP\r\n");
+    Print_Params(source);
+}
 
 static void Dispatch_Immediate(uint8_t ch, uint8_t source)
 {
-    /* 自动模式运行中：拒绝开关类命令 (0/1/f)，允许状态流命令 */
+    /* A stop command always outranks task ownership and normal command guards. */
+    if (ch == '0' || ch == 's' || ch == 'S' || ch == '!') {
+        CmdDispatch_EmergencyStop(source);
+        return;
+    }
+
+    /* 自动模式运行中：拒绝会抢占控制权的命令，允许状态流命令。 */
     if (TaskController_IsRunning() &&
-        (ch == '0' || ch == '1' || ch == 's' || ch == 'S' ||
-         ch == 'f' || ch == 'F')) {
+        (ch == '1' || ch == 'f' || ch == 'F')) {
         Param_Printf(source, "BUSY: TaskController running, send A0 first\r\n");
         return;
     }
-    if (ch == '0' || ch == 's' || ch == 'S') {
-        if (g_MagAutoCal) {
-            CmdDispatch_CancelMagAutoCal(source);
-        }
-        g_Cmd = 0x30;
-        g_Run = 0U;
-        Apply_Targets();
-        Print_Params(source);
-    } else if (ch == '1') {
+    if (ch == '1') {
         g_Cmd = 0x31;
         if (LineFollow_IsEnabled()) {
             LineFollow_Stop();
@@ -917,28 +979,36 @@ static void Dispatch_Immediate(uint8_t ch, uint8_t source)
 
 static void Dispatch_Byte(uint8_t ch, uint8_t source)
 {
-    if (tune_active) {
+    CmdLineParser *parser = CmdDispatch_GetLineParser(source);
+
+    /* These bytes are unambiguous and remain available after a broken frame. */
+    if (ch == '!' || ch == 's' || ch == 'S') {
+        CmdDispatch_EmergencyStop(source);
+        return;
+    }
+    if (parser == 0) return;
+
+    if (parser->active) {
         if (ch == '\n' || ch == '\r') {
-            tune_line[tune_len] = '\0';
-            if (tune_len > 0U) Parse_TuneLine(tune_line, tune_source);
-            tune_len = 0U;
-            tune_active = 0U;
-            tune_source = STREAM_TARGET_NONE;
-        } else if (tune_len < (LINE_BUF_SIZE - 1U)) {
-            tune_line[tune_len++] = (char)ch;
+            parser->line[parser->len] = '\0';
+            if (parser->len > 0U) Parse_TuneLine(parser->line, source);
+            parser->len = 0U;
+            parser->active = 0U;
+        } else if (parser->len < (LINE_BUF_SIZE - 1U)) {
+            parser->line[parser->len++] = (char)ch;
         } else {
-            tune_len = 0U;
-            tune_active = 0U;
-            tune_source = STREAM_TARGET_NONE;
+            /* Discard the whole oversized frame instead of executing a prefix. */
+            parser->len = 0U;
+            parser->active = 0U;
+            Param_Printf(source, "ERR command too long\r\n");
         }
         return;
     }
 
     if (Is_LineCmd(ch)) {
-        tune_len = 0U;
-        tune_line[tune_len++] = (char)ch;
-        tune_active = 1U;
-        tune_source = source;
+        parser->len = 0U;
+        parser->line[parser->len++] = (char)ch;
+        parser->active = 1U;
         return;
     }
 

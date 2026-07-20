@@ -13,6 +13,8 @@ static volatile uint16_t serial_ring_tail = 0U;
 static volatile uint8_t serial_tx_ring[SERIAL_TX_RING_SIZE];
 static volatile uint16_t serial_tx_head;
 static volatile uint16_t serial_tx_tail;
+static volatile uint32_t serial_rx_overflow_count;
+static volatile uint32_t serial_tx_overflow_count;
 static char serial_printf_buffer[SERIAL_PRINTF_BUF_SIZE];
 
 static void Serial_TxDrain(void)
@@ -42,7 +44,10 @@ static void Serial_TxPut(uint8_t byte)
 {
     uint16_t next = (uint16_t)(serial_tx_head + 1U);
     if (next >= SERIAL_TX_RING_SIZE) next = 0U;
-    if (next == serial_tx_tail) return;
+    if (next == serial_tx_tail) {
+        serial_tx_overflow_count++;
+        return;
+    }
     serial_tx_ring[serial_tx_head] = byte;
     serial_tx_head = next;
 }
@@ -51,7 +56,10 @@ void Serial_RingBuf_Put(uint8_t ch)
 {
     uint16_t next = (uint16_t) (serial_ring_head + 1U);
     if (next >= SERIAL_RING_SIZE) next = 0U;
-    if (next == serial_ring_tail) return;
+    if (next == serial_ring_tail) {
+        serial_rx_overflow_count++;
+        return;
+    }
 
     serial_ring[serial_ring_head] = ch;
     serial_ring_head = next;
@@ -71,10 +79,15 @@ uint8_t Serial_RingBuf_IsEmpty(void)
     return (serial_ring_head == serial_ring_tail) ? 1U : 0U;
 }
 
+uint32_t Serial_GetRxOverflowCount(void) { return serial_rx_overflow_count; }
+uint32_t Serial_GetTxOverflowCount(void) { return serial_tx_overflow_count; }
+
 void Serial_Init(void)
 {
     serial_tx_head = 0U;
     serial_tx_tail = 0U;
+    serial_rx_overflow_count = 0U;
+    serial_tx_overflow_count = 0U;
     DL_UART_enableInterrupt(UART_0_INST, DL_UART_MAIN_INTERRUPT_RX);
     NVIC_ClearPendingIRQ(UART_0_INST_INT_IRQN);
     NVIC_EnableIRQ(UART_0_INST_INT_IRQN);

@@ -101,8 +101,7 @@ static void AutoTrackTask_StopMotion(void)
         HeadingDrive_Stop();
     }
     Motor_OpenLoop_Stop();
-    Motor_SetTarget_L(0);
-    Motor_SetTarget_R(0);
+    Motor_SetTargets(0, 0);
     Motor_Control_Stop();
     Timer_ResetSpeedFilter();
     g_Run = 0U;

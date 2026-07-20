@@ -12,6 +12,8 @@ void Motor_SoftStart_Update(void);
 
 void Motor_SetTarget_L(int16_t target);
 void Motor_SetTarget_R(int16_t target);
+/* Atomically updates both wheel targets so the 20 ms ISR cannot observe a half-update. */
+void Motor_SetTargets(int16_t target_l, int16_t target_r);
 
 void Motor_OpenLoop_Set(int16_t pwm);
 void Motor_OpenLoop_Stop(void);

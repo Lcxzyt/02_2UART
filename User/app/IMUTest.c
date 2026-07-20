@@ -45,9 +45,9 @@ static int16_t IMUTest_RoundNormalizeYaw(float yaw)
 
 bool IMUTest_Init(void)
 {
-    if (imu_init_tried) {
-        return imu_inited;
-    }
+    if (imu_inited) return true;
+
+    /* A previous transient I2C failure must not latch the IMU off until reset. */
     imu_init_tried = true;
     imu_inited = (IMU_Init() != 0U);
 

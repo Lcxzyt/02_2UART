@@ -17,6 +17,8 @@ static volatile uint32_t bluetooth_irq_count = 0U;
 static volatile uint8_t bluetooth_tx_ring[BLUETOOTH_TX_RING_SIZE];
 static volatile uint16_t bluetooth_tx_head;
 static volatile uint16_t bluetooth_tx_tail;
+static volatile uint32_t bluetooth_rx_overflow_count;
+static volatile uint32_t bluetooth_tx_overflow_count;
 static char bluetooth_printf_buffer[BLUETOOTH_PRINTF_BUF_SIZE];
 
 static void Bluetooth_TxDrain(void)
@@ -46,7 +48,10 @@ static void Bluetooth_TxPut(uint8_t byte)
 {
     uint16_t next = (uint16_t)(bluetooth_tx_head + 1U);
     if (next >= BLUETOOTH_TX_RING_SIZE) next = 0U;
-    if (next == bluetooth_tx_tail) return;
+    if (next == bluetooth_tx_tail) {
+        bluetooth_tx_overflow_count++;
+        return;
+    }
     bluetooth_tx_ring[bluetooth_tx_head] = byte;
     bluetooth_tx_head = next;
 }
@@ -55,7 +60,10 @@ void Bluetooth_RingBuf_Put(uint8_t ch)
 {
     uint16_t next = (uint16_t)(bluetooth_ring_head + 1U);
     if (next >= BLUETOOTH_RING_SIZE) next = 0U;
-    if (next == bluetooth_ring_tail) return;
+    if (next == bluetooth_ring_tail) {
+        bluetooth_rx_overflow_count++;
+        return;
+    }
 
     bluetooth_ring[bluetooth_ring_head] = ch;
     bluetooth_ring_head = next;
@@ -102,11 +110,16 @@ uint32_t Bluetooth_GetIrqCount(void)
     return bluetooth_irq_count;
 }
 
+uint32_t Bluetooth_GetRxOverflowCount(void) { return bluetooth_rx_overflow_count; }
+uint32_t Bluetooth_GetTxOverflowCount(void) { return bluetooth_tx_overflow_count; }
+
 void Bluetooth_Init(void)
 {
 #if BLUETOOTH_UART_ENABLE
     bluetooth_tx_head = 0U;
     bluetooth_tx_tail = 0U;
+    bluetooth_rx_overflow_count = 0U;
+    bluetooth_tx_overflow_count = 0U;
     DL_UART_Main_setRXFIFOThreshold(BT_UART_INST, DL_UART_MAIN_RX_FIFO_LEVEL_ONE_ENTRY);
     DL_UART_enableInterrupt(BT_UART_INST, DL_UART_MAIN_INTERRUPT_RX);
     NVIC_ClearPendingIRQ(BT_UART_INST_INT_IRQN);

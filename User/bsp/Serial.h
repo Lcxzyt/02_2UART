@@ -14,5 +14,8 @@ void Serial_PrintFloat(float val, uint8_t intDig, uint8_t fracDig);
 void Serial_RingBuf_Put(uint8_t ch);
 uint8_t Serial_RingBuf_Get(void);
 uint8_t Serial_RingBuf_IsEmpty(void);
+/* Number of bytes discarded because the corresponding ring was full since init. */
+uint32_t Serial_GetRxOverflowCount(void);
+uint32_t Serial_GetTxOverflowCount(void);
 
 #endif

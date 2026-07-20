@@ -56,8 +56,8 @@ static void HeadingDrive_ResetController(void)
 
 static void HeadingDrive_SetTargets(int16_t left, int16_t right)
 {
-    Motor_SetTarget_L(Clamp_Int16(left, -HD_TARGET_LIMIT, HD_TARGET_LIMIT));
-    Motor_SetTarget_R(Clamp_Int16(right, -HD_TARGET_LIMIT, HD_TARGET_LIMIT));
+    Motor_SetTargets(Clamp_Int16(left, -HD_TARGET_LIMIT, HD_TARGET_LIMIT),
+                     Clamp_Int16(right, -HD_TARGET_LIMIT, HD_TARGET_LIMIT));
 }
 
 void HeadingDrive_Init(void)

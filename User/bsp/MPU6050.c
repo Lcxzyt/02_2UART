@@ -28,9 +28,13 @@ uint8_t MPU6050_Init(void)
 {
     uint8_t id = 0U;
 
-    (void)MPU6050_WriteReg(MPU6050_PWR_MGMT_1, 0x80U);
+    if (!MPU6050_WriteReg(MPU6050_PWR_MGMT_1, 0x80U)) {
+        return 0U;
+    }
     Delay_ms(100U);
-    (void)MPU6050_WriteReg(MPU6050_PWR_MGMT_1, 0x00U);
+    if (!MPU6050_WriteReg(MPU6050_PWR_MGMT_1, 0x00U)) {
+        return 0U;
+    }
     Delay_ms(50U);
 
     if (!MPU6050_ReadReg(MPU6050_WHO_AM_I, &id)) {
@@ -40,16 +44,17 @@ uint8_t MPU6050_Init(void)
         return 0U;
     }
 
-    (void)MPU6050_WriteReg(MPU6050_PWR_MGMT_1, 0x00U);
+    /* Every setting below is assumed by the scale factors and heading filter. */
+    if (!MPU6050_WriteReg(MPU6050_PWR_MGMT_1, 0x00U)) return 0U;
     Delay_ms(10U);
-    (void)MPU6050_WriteReg(MPU6050_SMPLRT_DIV, 0x07U);
-    (void)MPU6050_WriteReg(MPU6050_CONFIG, 0x03U);       /* DLPF: ~42Hz gyro */
-    (void)MPU6050_WriteReg(MPU6050_GYRO_CONFIG, MPU6050_GYRO_CONFIG_VALUE);
-    (void)MPU6050_WriteReg(MPU6050_ACCEL_CONFIG, 0x00U);
-    (void)MPU6050_WriteReg(MPU6050_PWR_MGMT_2, 0x00U);
-    (void)MPU6050_WriteReg(MPU6050_INT_ENABLE, 0x00U);
-    (void)MPU6050_WriteReg(MPU6050_USER_CTRL, 0x00U);
-    (void)MPU6050_WriteReg(MPU6050_INT_PIN_CFG, 0x02U);
+    if (!MPU6050_WriteReg(MPU6050_SMPLRT_DIV, 0x07U)) return 0U;
+    if (!MPU6050_WriteReg(MPU6050_CONFIG, 0x03U)) return 0U; /* DLPF: ~42Hz gyro */
+    if (!MPU6050_WriteReg(MPU6050_GYRO_CONFIG, MPU6050_GYRO_CONFIG_VALUE)) return 0U;
+    if (!MPU6050_WriteReg(MPU6050_ACCEL_CONFIG, 0x00U)) return 0U;
+    if (!MPU6050_WriteReg(MPU6050_PWR_MGMT_2, 0x00U)) return 0U;
+    if (!MPU6050_WriteReg(MPU6050_INT_ENABLE, 0x00U)) return 0U;
+    if (!MPU6050_WriteReg(MPU6050_USER_CTRL, 0x00U)) return 0U;
+    if (!MPU6050_WriteReg(MPU6050_INT_PIN_CFG, 0x02U)) return 0U;
     Delay_ms(50U);
 
     return id;
@@ -62,7 +67,11 @@ uint8_t MPU6050_GetID(void)
 
 uint8_t MPU6050_IsBypassEnabled(void)
 {
-    return (MPU6050_ReadRegValue(MPU6050_INT_PIN_CFG) & 0x02U) ? 1U : 0U;
+    uint8_t value;
+
+    /* A failed read must not look like success merely because 0xFF has bit 1 set. */
+    if (!MPU6050_ReadReg(MPU6050_INT_PIN_CFG, &value)) return 0U;
+    return (value & 0x02U) ? 1U : 0U;
 }
 
 bool MPU6050_GetData(int16_t *accX, int16_t *accY, int16_t *accZ,

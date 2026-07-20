@@ -77,8 +77,7 @@ static int16_t LineFollow_RoundFloat(float value)
 
 static void LineFollow_SetTargets(int16_t left, int16_t right)
 {
-    Motor_SetTarget_L(Clamp_Target(left));
-    Motor_SetTarget_R(Clamp_Target(right));
+    Motor_SetTargets(Clamp_Target(left), Clamp_Target(right));
 }
 
 static void LineFollow_ResetState(void)
